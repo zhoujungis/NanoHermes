@@ -1,0 +1,274 @@
+/* NanoHermes 设计变量：单一来源，组件只引用变量，不写死颜色。
+ *
+ * 颜色全部是可换主题的：三套配色各自写在一个 [data-theme] 块里（石墨 / 午夜 /
+ * 素笺），`<html data-theme>` 由 lib/theme.ts 设置。尺寸、字体、圆角与主题无关，
+ * 放在最上面的 :root 里。
+ */
+
+:root {
+  --radius: 10px;
+  --radius-sm: 7px;
+
+  --font: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont,
+    "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
+
+  /* 四区骨架尺寸 */
+  --h-titlebar: 40px;
+  --h-taskbar: 46px;
+  --w-sidebar: 264px;
+  --w-aside: 336px;
+  --w-stream: 800px;
+}
+
+/* ------------------------------------------------------------------ 石墨（默认深色）
+   中性石墨底色 —— 刻意避开「AI 紫渐变」的模板感 */
+:root,
+[data-theme="graphite"] {
+  color-scheme: dark;
+
+  --bg: #0b0c0f;
+  --panel: #101114;
+  --panel-2: #15171b;
+  --panel-3: #1b1e23;
+  --panel-4: #23272e;
+  --line: rgba(255, 255, 255, 0.065);
+  --line-2: rgba(255, 255, 255, 0.115);
+  --line-strong: rgba(255, 255, 255, 0.18);
+
+  --text: #e8e9ec;
+  --text-2: #9ca1aa;
+  --text-3: #686d77;
+  --text-4: #4b4f57;
+  --text-strong: #ffffff;
+
+  --accent: #8b8cf0;
+  --accent-soft: rgba(139, 140, 240, 0.13);
+  --accent-line: rgba(139, 140, 240, 0.4);
+  --accent-line-strong: rgba(139, 140, 240, 0.52);
+
+  /* 会话内查找：普通命中与被选中的那一处 */
+  --find-bg: rgba(139, 140, 240, 0.26);
+  --find-bg-cur: #8b8cf0;
+  --find-fg-cur: #10121a;
+
+  --ok: #46c08a;
+  --ok-soft: rgba(70, 192, 138, 0.11);
+  --ok-line: rgba(70, 192, 138, 0.34);
+  --warn: #d8a94a;
+  --danger: #ef5f64;
+  --danger-soft: rgba(239, 95, 100, 0.12);
+  --danger-soft-2: rgba(239, 95, 100, 0.2);
+  --danger-line: rgba(239, 95, 100, 0.35);
+  --danger-text: #e77a7e;
+
+  --ring: 0 0 0 3px rgba(139, 140, 240, 0.13);
+  --shadow-menu: 0 18px 44px -12px rgba(0, 0, 0, 0.85);
+  --shadow-card: 0 8px 22px -10px rgba(0, 0, 0, 0.66);
+
+  --sbar: rgba(255, 255, 255, 0.075);
+  --sbar-hover: rgba(255, 255, 255, 0.15);
+  --scrim: rgba(8, 9, 12, 0.76);
+  --scrim-soft: rgba(0, 0, 0, 0.45);
+
+  --code-bg: #0d0f13;
+  --code-fg: #c8ced9;
+  --code-inline-bg: rgba(255, 255, 255, 0.07);
+
+  /* 实心按钮：深色界面里用浅色按钮，浅色界面里反过来 */
+  --btn-solid-bg: #e9eaec;
+  --btn-solid-fg: #0b0c0f;
+  --btn-solid-hover: #ffffff;
+  --close-bg: #c4383c;
+  --close-fg: #ffffff;
+
+  --warn-line: rgba(216, 169, 74, 0.3);
+  --warn-line-2: rgba(216, 169, 74, 0.35);
+  --warn-soft: rgba(216, 169, 74, 0.08);
+  --warn-soft-2: rgba(216, 169, 74, 0.14);
+  --warn-text: #e2bd6d;
+
+  --diff-fg: #aab1bd;
+  --diff-add-bg: rgba(70, 192, 138, 0.11);
+  --diff-add-fg: #8fd7b3;
+  --diff-del-bg: rgba(239, 95, 100, 0.11);
+  --diff-del-fg: #f0a0a3;
+  --diff-wd-add-bg: rgba(70, 192, 138, 0.26);
+  --diff-wd-del-bg: rgba(239, 95, 100, 0.26);
+  --diff-cur-bg: rgba(127, 142, 255, 0.1);
+
+  --hl-comment: #666e7d;
+  --hl-keyword: #b0a2f5;
+  --hl-string: #82d2a6;
+  --hl-number: #e0b171;
+  --hl-title: #7fb6f2;
+  --hl-type: #9fc7e8;
+  --hl-tag: #8b93a1;
+  --hl-del: #ef7f83;
+}
+
+/* ------------------------------------------------------------------ 午夜（冷调深色） */
+[data-theme="midnight"] {
+  color-scheme: dark;
+
+  --bg: #090c14;
+  --panel: #0d111a;
+  --panel-2: #121724;
+  --panel-3: #181e2d;
+  --panel-4: #1f2637;
+  --line: rgba(255, 255, 255, 0.07);
+  --line-2: rgba(255, 255, 255, 0.12);
+  --line-strong: rgba(255, 255, 255, 0.19);
+
+  --text: #e7eaf2;
+  --text-2: #99a3b8;
+  --text-3: #667086;
+  --text-4: #49525f;
+  --text-strong: #ffffff;
+
+  --accent: #6ea8fe;
+  --accent-soft: rgba(110, 168, 254, 0.14);
+  --accent-line: rgba(110, 168, 254, 0.42);
+  --accent-line-strong: rgba(110, 168, 254, 0.56);
+
+  /* 会话内查找：普通命中与被选中的那一处 */
+  --find-bg: rgba(110, 168, 254, 0.26);
+  --find-bg-cur: #6ea8fe;
+  --find-fg-cur: #0a0f18;
+
+  --ok: #46c08a;
+  --ok-soft: rgba(70, 192, 138, 0.11);
+  --ok-line: rgba(70, 192, 138, 0.34);
+  --warn: #d8a94a;
+  --danger: #ef5f64;
+  --danger-soft: rgba(239, 95, 100, 0.14);
+  --danger-soft-2: rgba(239, 95, 100, 0.2);
+  --danger-line: rgba(239, 95, 100, 0.35);
+  --danger-text: #e77a7e;
+
+  --ring: 0 0 0 3px rgba(110, 168, 254, 0.16);
+  --shadow-menu: 0 18px 44px -12px rgba(0, 0, 0, 0.85);
+  --shadow-card: 0 8px 22px -10px rgba(0, 0, 0, 0.66);
+
+  --sbar: rgba(255, 255, 255, 0.075);
+  --sbar-hover: rgba(255, 255, 255, 0.15);
+  --scrim: rgba(5, 7, 13, 0.78);
+  --scrim-soft: rgba(0, 0, 0, 0.45);
+
+  --code-bg: #0b0f18;
+  --code-fg: #c9d1e0;
+  --code-inline-bg: rgba(255, 255, 255, 0.07);
+
+  --btn-solid-bg: #e3e8f2;
+  --btn-solid-fg: #0a0d14;
+  --btn-solid-hover: #ffffff;
+  --close-bg: #c4383c;
+  --close-fg: #ffffff;
+
+  --warn-line: rgba(216, 169, 74, 0.3);
+  --warn-line-2: rgba(216, 169, 74, 0.35);
+  --warn-soft: rgba(216, 169, 74, 0.08);
+  --warn-soft-2: rgba(216, 169, 74, 0.14);
+  --warn-text: #e2bd6d;
+
+  --diff-fg: #a9b2c2;
+  --diff-add-bg: rgba(70, 192, 138, 0.11);
+  --diff-add-fg: #8fd7b3;
+  --diff-del-bg: rgba(239, 95, 100, 0.11);
+  --diff-del-fg: #f0a0a3;
+  --diff-wd-add-bg: rgba(70, 192, 138, 0.24);
+  --diff-wd-del-bg: rgba(239, 95, 100, 0.24);
+  --diff-cur-bg: rgba(127, 142, 255, 0.09);
+
+  --hl-comment: #616b80;
+  --hl-keyword: #a7a4f8;
+  --hl-string: #7fd2a4;
+  --hl-number: #dfb075;
+  --hl-title: #79b4f5;
+  --hl-type: #9dc6ea;
+  --hl-tag: #8792a6;
+  --hl-del: #f0808a;
+}
+
+/* ------------------------------------------------------------------ 素笺（浅色） */
+[data-theme="paper"] {
+  color-scheme: light;
+
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --panel-2: #f2f3f6;
+  --panel-3: #eceef2;
+  --panel-4: #e2e5ea;
+  --line: rgba(17, 22, 32, 0.09);
+  --line-2: rgba(17, 22, 32, 0.16);
+  --line-strong: rgba(17, 22, 32, 0.24);
+
+  --text: #1a1d23;
+  --text-2: #545b67;
+  --text-3: #7c8492;
+  --text-4: #9ba2ae;
+  --text-strong: #06080c;
+
+  --accent: #5457d6;
+  --accent-soft: rgba(84, 87, 214, 0.1);
+  --accent-line: rgba(84, 87, 214, 0.4);
+  --accent-line-strong: rgba(84, 87, 214, 0.55);
+
+  /* 会话内查找：普通命中与被选中的那一处 */
+  --find-bg: rgba(84, 87, 214, 0.2);
+  --find-bg-cur: #5457d6;
+  --find-fg-cur: #ffffff;
+
+  --ok: #12855a;
+  --ok-soft: rgba(18, 133, 90, 0.1);
+  --ok-line: rgba(18, 133, 90, 0.32);
+  --warn: #9a7414;
+  --danger: #cf3b46;
+  --danger-soft: rgba(207, 59, 70, 0.1);
+  --danger-soft-2: rgba(207, 59, 70, 0.16);
+  --danger-line: rgba(207, 59, 70, 0.32);
+  --danger-text: #c0293a;
+
+  --ring: 0 0 0 3px rgba(84, 87, 214, 0.16);
+  --shadow-menu: 0 18px 44px -14px rgba(20, 25, 45, 0.28);
+  --shadow-card: 0 8px 20px -12px rgba(20, 25, 45, 0.24);
+
+  --sbar: rgba(17, 22, 32, 0.16);
+  --sbar-hover: rgba(17, 22, 32, 0.3);
+  --scrim: rgba(18, 22, 30, 0.68);
+  --scrim-soft: rgba(22, 26, 34, 0.32);
+
+  --code-bg: #f4f5f7;
+  --code-fg: #2b3038;
+  --code-inline-bg: rgba(17, 22, 32, 0.06);
+
+  --btn-solid-bg: #1a1d23;
+  --btn-solid-fg: #ffffff;
+  --btn-solid-hover: #33383f;
+  --close-bg: #d33a3f;
+  --close-fg: #ffffff;
+
+  --warn-line: rgba(154, 116, 20, 0.3);
+  --warn-line-2: rgba(154, 116, 20, 0.34);
+  --warn-soft: rgba(154, 116, 20, 0.08);
+  --warn-soft-2: rgba(154, 116, 20, 0.14);
+  --warn-text: #8a6410;
+
+  --diff-fg: #3d434d;
+  --diff-add-bg: rgba(20, 140, 90, 0.12);
+  --diff-add-fg: #12724a;
+  --diff-del-bg: rgba(200, 45, 60, 0.1);
+  --diff-del-fg: #b3272f;
+  --diff-wd-add-bg: rgba(20, 140, 90, 0.22);
+  --diff-wd-del-bg: rgba(200, 45, 60, 0.2);
+  --diff-cur-bg: rgba(40, 78, 190, 0.08);
+
+  --hl-comment: #6b7280;
+  --hl-keyword: #8250df;
+  --hl-string: #0a7d3f;
+  --hl-number: #9a5b00;
+  --hl-title: #0550ae;
+  --hl-type: #1f6f8b;
+  --hl-tag: #57606a;
+  --hl-del: #c0263a;
+}

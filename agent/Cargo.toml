@@ -1,0 +1,17 @@
+[package]
+name = "agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+readme.workspace = true
+description = "NanoHermes Agent — a lightweight, low-memory terminal coding agent (Codex/Trae-style) in Rust"
+
+# Minimal dependency footprint is a design goal:
+#  - no async runtime (no tokio) => no per-task state machines / thread pools
+#  - one blocking HTTP client (ureq) instead of reqwest/hyper
+#  - serde_json only (no serde derive proc-macro)
+[dependencies]
+serde_json = "1"
+ureq = { version = "2", features = ["json", "tls"] }
+base64 = "0.22"

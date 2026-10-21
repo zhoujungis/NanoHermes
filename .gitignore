@@ -1,0 +1,9 @@
+# Rust — workspace build output
+/target
+
+# Frontend (Vite + React, under ui/)
+node_modules/
+ui/dist/
+
+# Generated Tauri schemas
+gui/gen/

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["agent", "gui"]
+
+# Shared package metadata for every crate in the workspace — one source of truth.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["NanoHermes"]
+license = "MIT"
+readme = "README.md"
+description = "NanoHermes — a lightweight terminal coding agent and its Tauri desktop app"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

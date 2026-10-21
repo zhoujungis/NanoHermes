@@ -1,0 +1,13 @@
+{
+  "name": "nanohermes",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "npm --prefix ui run dev",
+    "build": "npm --prefix ui run build",
+    "test": "npm --prefix ui run test",
+    "test:ui": "npm --prefix ui run test",
+    "test:rust": "cargo test --workspace",
+    "test:all": "npm --prefix ui run test && cargo test --workspace"
+  }
+}

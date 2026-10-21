@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NanoHermes</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- 首帧前先定主题，避免浅色主题闪一下深色底 -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("nanohermes.theme.v1");
+          var dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          if (t !== "graphite" && t !== "midnight" && t !== "paper") {
+            t = dark ? "graphite" : "paper";
+          }
+          document.documentElement.dataset.theme = t;
+        } catch (e) {
+          document.documentElement.dataset.theme = "graphite";
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
