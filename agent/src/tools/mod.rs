@@ -157,7 +157,7 @@ pub fn specs() -> Value {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Run a shell command via `sh -c` in the workspace and return its exit code, stdout and stderr. Use non-interactive flags. Set background=true for long-running tasks, then poll with task_output.",
+                "description": "Run a shell command in the workspace and return its exit code, stdout and stderr. Commands go through `sh -c` on Linux/macOS and `cmd.exe /C` on Windows, so write syntax for that shell. Use non-interactive flags. Set background=true for long-running tasks, then poll with task_output.",
                 "parameters": {
                     "type": "object",
                     "properties": {

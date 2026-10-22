@@ -552,6 +552,29 @@ describe("流式输出增量渲染（端到端）", () => {
     expect(tail.textContent!.length).toBeLessThan(4200);
   });
 
+  it("长回答可以折叠成两行摘要，点击摘要块展开", async () => {
+    const { container, delta, finish } = await startStream();
+
+    delta("这是一段很长的回答内容。".repeat(40));
+    finish();
+    await waitFor(() => expect(container.querySelector(".content.stream")).toBeNull());
+
+    const foldBtn = Array.from(container.querySelectorAll(".acts button")).find((b) =>
+      b.textContent?.includes("折叠"),
+    ) as HTMLButtonElement;
+    expect(foldBtn).toBeTruthy();
+    fireEvent.click(foldBtn);
+
+    const box = container.querySelector(".foldbox") as HTMLButtonElement;
+    expect(box).not.toBeNull();
+    expect(box.textContent).toContain("已折叠");
+
+    // 摘要块本身也是展开入口，不用再去找操作区按钮。
+    fireEvent.click(box);
+    await waitFor(() => expect(container.querySelector(".foldbox")).toBeNull());
+    expect(container.querySelector(".content")).not.toBeNull();
+  });
+
   it("点击停止后进入等待态，本轮收尾时复位并提示已停止", async () => {
     const { container, store, finish } = await startStream();
     const btn = container.querySelector(".send.stop") as HTMLButtonElement;
@@ -567,11 +590,14 @@ describe("流式输出增量渲染（端到端）", () => {
     // 顶栏状态从「执行中」变成「停止中」，请求已生效这件事全程可见。
     expect(container.querySelector(".state-chip")?.textContent).toBe("停止中");
 
-    // 等待期间按 Enter 不会静默丢弃，明确告知正在停止、稍后再发。
+    // 等待期间按 Enter 不会静默丢弃：消息进队列，输入框清空并显示队列条。
     const ta = container.querySelector("#prompt") as HTMLTextAreaElement;
     fireEvent.change(ta, { target: { value: "再问一句" } });
     fireEvent.keyDown(ta, { key: "Enter" });
-    await waitFor(() => expect(store.getState().toast).toContain("正在停止"));
+    await waitFor(() => expect(store.getState().toast).toContain("已加入队列"));
+    expect(ta.value).toBe("");
+    await waitFor(() => expect(container.querySelector(".queuebar")).not.toBeNull());
+    expect(container.querySelector(".queuebar")?.textContent).toContain("再问一句");
 
     // 本轮结束：等待标记复位，停止按钮换回发送键，并给一次「已停止」回执。
     finish();

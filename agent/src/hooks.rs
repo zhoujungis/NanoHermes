@@ -1,6 +1,6 @@
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -26,8 +26,9 @@ impl HookOutcome {
     }
 }
 
-/// Run a single hook via `sh -c` in the workspace root. The tool call is written
-/// to the hook's stdin as JSON, and the tool name / event are also exported as
+/// Run a single hook via the platform shell (`sh -c` on Unix, `cmd.exe /C` on
+/// Windows) in the workspace root. The tool call is written to the hook's stdin
+/// as JSON, and the tool name / event are also exported as
 /// `NANOHERMES_TOOL_NAME` and `NANOHERMES_HOOK_EVENT`.
 pub fn run(def: &HookDef, tool: &str, args: &Value, root: &Path) -> Result<HookOutcome, String> {
     let event = match def.event {
@@ -35,9 +36,7 @@ pub fn run(def: &HookDef, tool: &str, args: &Value, root: &Path) -> Result<HookO
         HookEvent::PostToolUse => "PostToolUse",
     };
 
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(&def.command)
+    let mut child = crate::tools::shell::shell_command(&def.command)
         .current_dir(root)
         .env("NANOHERMES_TOOL_NAME", tool)
         .env("NANOHERMES_HOOK_EVENT", event)

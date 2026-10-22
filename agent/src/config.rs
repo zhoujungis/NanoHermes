@@ -250,7 +250,8 @@ impl HookEvent {
     }
 }
 
-/// A command hook: `command` is run via `sh -c` when a matching tool is called.
+/// A command hook: `command` is run via the platform shell (`sh -c` on Unix,
+/// `cmd.exe /C` on Windows) when a matching tool is called.
 #[derive(Clone, Debug)]
 pub struct HookDef {
     pub event: HookEvent,

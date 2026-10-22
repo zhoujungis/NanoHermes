@@ -44,10 +44,8 @@ impl TaskManager {
         sandbox: crate::config::SandboxMode,
         workspace: &std::path::Path,
     ) -> Result<String, String> {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg(command)
-            .current_dir(cwd)
+        let mut cmd = super::shell::shell_command(command);
+        cmd.current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -55,7 +53,7 @@ impl TaskManager {
             .map_err(|e| format!("sandbox error: {e}"))?;
         let child = cmd
             .spawn()
-            .map_err(|e| format!("failed to spawn `sh`: {e}"))?;
+            .map_err(|e| format!("failed to start shell: {e}"))?;
 
         let id = format!("task-{}", std::process::id());
         // Append a short random-ish suffix based on the instant to avoid

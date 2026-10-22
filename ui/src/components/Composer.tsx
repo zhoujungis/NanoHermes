@@ -8,10 +8,13 @@ import {
   personaIsCustom,
   personaLabel,
   removeAttachment,
+  removeQueued,
   removeRef,
   resolveModel,
   resolvePersona,
+  runningTaskId,
   send,
+  sendQueued,
   setMode,
   setPrompt,
   stop,
@@ -65,6 +68,14 @@ export function Composer({
     ? !!(st.settings?.cloud_url || "").trim()
     : !!(resolveModel(st.settings, task?.model)?.api_key || "").trim();
   const plan = st.mode === "plan" || st.mode === "debug";
+  // 当前任务里排队等待发送的消息；只有本任务正在跑时才会自动续发。
+  const queue = task?.queue ?? [];
+  const queueAuto = st.busy && runningTaskId() === task?.id;
+  const queueHint = queueAuto
+    ? "本轮结束后自动发送"
+    : st.busy
+      ? "其他任务运行中，结束后点发送"
+      : "点击发送继续";
   const ta = useRef<HTMLTextAreaElement>(null);
   const plus = useRef<HTMLButtonElement>(null);
   const modelBtn = useRef<HTMLButtonElement>(null);
@@ -168,6 +179,35 @@ export function Composer({
               : "还没有配置模型服务，填写 API Key 后即可开始。"}
           </span>
           <button onClick={onOpenSettings}>去设置</button>
+        </div>
+      )}
+
+      {queue.length > 0 && (
+        <div className="queuebar" aria-label="待发送队列">
+          <div className="qh">
+            <Icon name="arrowUp" />
+            <span className="qc">队列 {queue.length} 条</span>
+            <span className="qs">{queueHint}</span>
+            <button
+              className="qsend"
+              disabled={st.busy}
+              title={queueHint}
+              onClick={() => sendQueued()}
+            >
+              发送
+            </button>
+          </div>
+          {queue.map((q, i) => (
+            <div className="qi" key={i}>
+              {q.imgs?.length ? <span className="qtag">图 {q.imgs.length}</span> : null}
+              <span className="qtext" title={q.text}>
+                {q.text || "（仅图片）"}
+              </span>
+              <button title="移出队列" onClick={() => removeQueued(i)}>
+                <Icon name="x" />
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
@@ -389,8 +429,10 @@ export function Composer({
             )}
 
             <div className="sp" />
-            <span className="hint">Enter 发送 · Shift+Enter 换行</span>
-            {st.busy && !cloud ? (
+            <span className="hint">
+              {st.busy ? "Enter 加入队列" : "Enter 发送"} · Shift+Enter 换行
+            </span>
+            {st.busy && !cloud && (
               <button
                 className={"send stop" + (st.stopping ? " waiting" : "")}
                 title={
@@ -403,16 +445,15 @@ export function Composer({
               >
                 {st.stopping ? <div className="spin" /> : <Icon name="square" />}
               </button>
-            ) : (
-              <button
-                className="send"
-                title={st.busy ? "云端执行中：远端 daemon 与本机串行处理同一条连接，无法中途停止" : "发送"}
-                disabled={st.busy || (!st.prompt.trim() && st.attachments.length === 0)}
-                onClick={() => void send()}
-              >
-                {st.busy ? <div className="spin" /> : <Icon name="arrowUp" />}
-              </button>
             )}
+            <button
+              className="send"
+              title={st.busy ? "加入队列，本轮结束后自动发送" : "发送"}
+              disabled={!st.prompt.trim() && st.attachments.length === 0}
+              onClick={() => void send()}
+            >
+              <Icon name="arrowUp" />
+            </button>
           </div>
         </div>
       </div>

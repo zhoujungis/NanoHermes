@@ -570,17 +570,77 @@ describe("流式实时文本的独立通道", () => {
     await s.stop();
     expect(invokeMock.mock.calls.filter((c) => c[0] === "stop_task")).toHaveLength(1);
 
-    // 等待期间按 Enter：明确提示，而不是静默丢弃。
+    // 等待期间按 Enter：不再静默丢弃，而是加入队列（停止后不会自动续发）。
     s.setPrompt("运行中再问一句");
     await s.send();
-    expect(s.getState().toast).toContain("正在停止");
-    expect(s.getState().prompt).toBe("运行中再问一句");
+    expect(s.getState().toast).toContain("已加入队列");
+    expect(s.getState().prompt).toBe("");
+    const queued = s.getState().tasks.find((t) => t.id === s.getState().activeId)!;
+    expect(queued.queue?.map((q) => q.text)).toEqual(["运行中再问一句"]);
 
     finish("");
     await done;
     expect(s.getState().busy).toBe(false);
     expect(s.getState().stopping).toBe(false);
+    // 主动停止后队列不自动续跑，留给用户决定何时继续。
+    expect(
+      s.getState().tasks.find((t) => t.id === s.getState().activeId)!.queue,
+    ).toHaveLength(1);
     // 收尾时给一次明确回执，用户才知道停止真的生效了。
     expect(s.getState().toast).toBe("任务已停止");
+  });
+
+  it("运行中继续发送会入队，本轮正常结束后按顺序自动续发", async () => {
+    const { s, finish, done } = await startStream();
+
+    s.setPrompt("第二轮的问题");
+    await s.send();
+    // 入队：输入框清空、队列留一条，此时还没有发出第二次请求。
+    expect(s.getState().prompt).toBe("");
+    expect(s.getState().toast).toContain("已加入队列");
+    expect(
+      s.getState().tasks.find((t) => t.id === s.getState().activeId)!.queue?.map((q) => q.text),
+    ).toEqual(["第二轮的问题"]);
+    expect(invokeMock.mock.calls.filter((c) => c[0] === "run_task")).toHaveLength(1);
+
+    // 第一轮正常收尾：队列被取走并自动发出第二轮。
+    finish("第一轮回答");
+    await done;
+    await new Promise((r) => setTimeout(r, 30));
+
+    const task = s.getState().tasks.find((t) => t.id === s.getState().activeId)!;
+    expect(task.queue ?? []).toEqual([]);
+    expect(task.msgs.filter((m) => m.k === "user")).toHaveLength(2);
+    expect(task.msgs.some((m) => m.k === "ai" && m.t === "第一轮回答")).toBe(true);
+    expect(invokeMock.mock.calls.filter((c) => c[0] === "run_task")).toHaveLength(2);
+    expect(s.getState().busy).toBe(true);
+  });
+
+  it("折叠长回答；流式中的消息不允许折叠", async () => {
+    const s = await freshStore();
+    s.autosaveSettings(settings());
+    await s.createTask(true, "local", "C:/ws");
+
+    const long = "这是一段很长的回答。".repeat(40);
+    s.pushMsg({ k: "ai", t: long, ts: Date.now() });
+    const task = s.getState().tasks.find((t) => t.id === s.getState().activeId)!;
+    const index = task.msgs.length - 1;
+
+    s.toggleFold(index);
+    expect(
+      s.getState().tasks.find((t) => t.id === s.getState().activeId)!.msgs[index].fold,
+    ).toBe(true);
+
+    s.toggleFold(index);
+    expect(
+      s.getState().tasks.find((t) => t.id === s.getState().activeId)!.msgs[index].fold,
+    ).toBe(false);
+
+    s.pushMsg({ k: "ai", t: "还在写", ts: Date.now(), streaming: true });
+    const last = s.getState().tasks.find((t) => t.id === s.getState().activeId)!.msgs.length - 1;
+    s.toggleFold(last);
+    expect(
+      s.getState().tasks.find((t) => t.id === s.getState().activeId)!.msgs[last].fold,
+    ).toBeUndefined();
   });
 });

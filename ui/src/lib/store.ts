@@ -42,6 +42,16 @@ export interface Msg {
   streaming?: boolean;
   /** 该条为错误信息。 */
   err?: boolean;
+  /** 长回答被折叠，只显示两行摘要。 */
+  fold?: boolean;
+}
+
+/** 一条排队等待发送的消息（当前回答结束后自动发出）。 */
+export interface QueueItem {
+  text: string;
+  imgs?: string[];
+  /** 发送时要内联进提示词的工作区引用。 */
+  refs: string[];
 }
 
 export interface Touched {
@@ -76,6 +86,8 @@ export interface Task {
   pinned?: boolean;
   /** 累计用量，未运行过则没有。 */
   usage?: Usage;
+  /** 运行中继续发送的消息，等本轮结束后按顺序发出。 */
+  queue?: QueueItem[];
 }
 
 /** 请求打开文件夹选择器；`forTask` 为空表示「给新建的本机任务选目录」。 */
@@ -343,6 +355,9 @@ function snapshot(dropImages: boolean) {
       persona: t.persona || "",
       pinned: !!t.pinned,
       usage: t.usage,
+      queue: (t.queue || []).map((q) =>
+        dropImages && q.imgs?.length ? { ...q, imgs: undefined } : q,
+      ),
     })),
   };
 }
@@ -381,6 +396,12 @@ function load(): void {
         persona: typeof t.persona === "string" ? t.persona : "",
         pinned: !!t.pinned,
         usage: t.usage && typeof t.usage.requests === "number" ? t.usage : undefined,
+        queue: Array.isArray(t.queue)
+          ? t.queue.filter(
+              (q): q is QueueItem =>
+                !!q && typeof q.text === "string" && Array.isArray(q.refs),
+            )
+          : undefined,
       }));
     state = { ...state, tasks, activeId: data.activeId || null };
   } catch {
@@ -726,7 +747,13 @@ export async function resetCurrent(): Promise<void> {
     return;
   }
   commit({
-    tasks: replaceTask(task.id, { msgs: [], files: [], title: "新任务", updatedAt: Date.now() }),
+    tasks: replaceTask(task.id, {
+      msgs: [],
+      files: [],
+      title: "新任务",
+      queue: [],
+      updatedAt: Date.now(),
+    }),
   });
   try {
     await invoke("reset_task");
@@ -1080,32 +1107,60 @@ export function insertSnippet(text: string): void {
  * 调用方显式传入历史消息的原文与图片）。
  */
 export async function send(text?: string, images?: string[]): Promise<void> {
+  // 从输入框发出的消息（没有显式传入原文），运行中要进队列，而不是被丢弃。
+  const fromComposer = text === undefined;
   const raw = (text !== undefined ? text : state.prompt).trim();
   const attached = images ?? state.attachments.map((a) => a.url);
   // 只有图片、没有文字也是合法的提问（例如「看看这张截图」的直接拖入）。
   if (!raw && attached.length === 0) return;
   if (!activeTask()) await createTask(true);
-  if (!activeTask()) return;
+  const task = activeTask();
+  if (!task) return;
   if (state.busy) {
-    // 运行中按 Enter 不能静默丢弃：明确告诉用户为什么没发出去、要等什么。
+    if (!fromComposer) {
+      // 重试旧消息需要显式排队位置，运行中直接重试会打乱当前轮次。
+      toast("上一次回答还在进行中，完成或停止后再重试");
+      return;
+    }
+    const n = (task.queue?.length || 0) + 1;
+    if (raw) pushHistory(raw);
+    enqueue(task, {
+      text: raw,
+      imgs: attached.length ? attached : undefined,
+      refs: state.refs.slice(),
+    });
+    // 输入框内容已经交给队列，和正常发送一样清空，避免下一轮重复带上。
+    commit({ prompt: "", refs: [], attachments: [] });
     toast(
       state.stopping
-        ? "正在停止当前任务，等本轮结束后再发送"
-        : "上一次回答还在进行中，完成或停止后再发送",
+        ? `已加入队列（${n} 条），停止后可点发送继续`
+        : `已加入队列（${n} 条），本轮结束后自动发送`,
+      "ok",
     );
     return;
   }
+  await runTurn(task, raw, attached, state.refs.slice(), {
+    remember: fromComposer,
+    clearComposer: true,
+    useRefs: fromComposer && !!raw,
+  });
+}
+
+/** 发送/排队共用的执行入口：绑定任务、落用户消息、跑完整一轮。 */
+async function runTurn(
+  task: Task,
+  raw: string,
+  attached: string[],
+  refs: string[],
+  opts: { remember: boolean; clearComposer: boolean; useRefs: boolean },
+): Promise<void> {
   // 这一轮绑定到当前任务：运行中切到别的任务时，增量/工具行/用量都落回它自己。
-  const task = activeTask()!;
   runTaskId = task.id;
 
-  let payload = raw;
-  const usedRefs = text === undefined && !!raw;
-  // 只有真正从输入框发出的提问进历史；重试旧消息不重复记。
-  if (text === undefined && raw) pushHistory(raw);
-  if (state.refs.length && usedRefs) {
-    payload = "（请参考工作区文件：" + state.refs.join("、") + "）\n" + raw;
-  }
+  const payload =
+    opts.useRefs && refs.length ? "（请参考工作区文件：" + refs.join("、") + "）\n" + raw : raw;
+  // 只有真正从输入框发出的提问进历史；重试旧消息、队列续发不重复记。
+  if (opts.remember && raw) pushHistory(raw);
 
   pushMsg({ k: "user", t: payload, imgs: attached.length ? attached : undefined, ts: Date.now() });
   if (task.title === "新任务") {
@@ -1113,11 +1168,11 @@ export async function send(text?: string, images?: string[]): Promise<void> {
   }
   // 已经随这条消息发出的引用与图片不再留在输入框里（重试时用消息自身的图片）。
   commit({
-    prompt: "",
+    prompt: opts.clearComposer ? "" : state.prompt,
     busy: true,
     stopping: false,
-    refs: usedRefs ? [] : state.refs,
-    attachments: images === undefined ? [] : state.attachments,
+    refs: opts.clearComposer ? [] : state.refs,
+    attachments: opts.clearComposer ? [] : state.attachments,
   });
 
   produced = false;
@@ -1180,8 +1235,69 @@ export async function send(text?: string, images?: string[]): Promise<void> {
     commit({ busy: false, stopping: false });
     save();
     if (stopped) toast("任务已停止", "ok");
+    // 正常结束后按顺序续发队列；主动停止时不自动续跑，把队列留给用户决定。
+    else window.setTimeout(() => drainQueue(task.id), 0);
   }
 }
+
+/** 把一条消息追加到任务的待发送队列。 */
+function enqueue(task: Task, item: QueueItem): void {
+  setQueue(task.id, [...(task.queue || []), item]);
+}
+
+function setQueue(taskId: string, queue: QueueItem[]): void {
+  commit({ tasks: replaceTask(taskId, { queue }) });
+  scheduleSave();
+}
+
+/** 取当前任务队列里的第一条立即发送（停止后由用户手动触发）。 */
+export function sendQueued(): void {
+  const task = activeTask();
+  if (task) drainQueue(task.id);
+}
+
+/** 移出队列中的某一条（按当前任务的下标）。 */
+export function removeQueued(index: number): void {
+  const task = activeTask();
+  const queue = task?.queue;
+  if (!task || !queue || index < 0 || index >= queue.length) return;
+  setQueue(
+    task.id,
+    queue.filter((_, i) => i !== index),
+  );
+}
+
+/**
+ * 续发队首。只在该任务仍是当前打开的任务时自动执行：用户运行中切到别的任务时，
+ * 不能把回答悄悄写进另一个任务的界面。
+ */
+function drainQueue(taskId: string): void {
+  if (state.busy || state.activeId !== taskId) return;
+  const task = state.tasks.find((t) => t.id === taskId);
+  const queue = task?.queue || [];
+  const item = queue[0];
+  if (!task || !item) return;
+  setQueue(taskId, queue.slice(1));
+  void runTurn(task, item.text, item.imgs || [], item.refs || [], {
+    remember: false,
+    clearComposer: false,
+    useRefs: item.refs.length > 0,
+  });
+}
+
+/** 长回答折叠/展开。 */
+export function toggleFold(index: number): void {
+  const task = activeTask();
+  const m = task?.msgs[index];
+  if (!task || !m || m.k !== "ai" || m.streaming) return;
+  const msgs = task.msgs.slice();
+  msgs[index] = { ...m, fold: !m.fold };
+  commit({ tasks: replaceTask(task.id, { msgs }) });
+  scheduleSave();
+}
+
+/** 正在运行的任务 id（用于判断队列是否会自动续发）。 */
+export const runningTaskId = (): string | null => runTaskId;
 
 /** 重试某条回答：复用其前面最近的一条用户消息（含当时的图片）。 */
 export function retryFrom(index: number): void {

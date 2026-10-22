@@ -905,7 +905,7 @@ fn header_value<'a>(lines: &'a [&'a str], name: &str) -> Option<String> {
 
 /// Run a shell command directly from the REPL (bypasses the agent).
 fn run_shell_direct(cmd: &str) {
-    match std::process::Command::new("sh").arg("-c").arg(cmd).status() {
+    match agent::tools::shell::shell_command(cmd).status() {
         Ok(status) => {
             if !status.success() {
                 eprintln!("exit code: {}", status.code().unwrap_or(-1));

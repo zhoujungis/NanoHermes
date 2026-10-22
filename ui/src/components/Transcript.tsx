@@ -27,6 +27,7 @@ import {
   send,
   subscribeStreamText,
   taskIsCloud,
+  toggleFold,
   useAppState,
   type Msg,
 } from "../lib/store";
@@ -78,9 +79,12 @@ export function Transcript() {
   );
   const total = hits.length;
   const index = total ? Math.min(cursor, total - 1) : -1;
+  // 查找期间，命中的折叠回答要临时展开，否则文字不在 DOM 里，高亮与跳转都会落空。
+  const searching = st.findOpen && !!query.trim();
 
   // 查找命中所在的消息必须在 DOM 里（find 按 [data-mi] 定位），一并扩进渲染窗口。
   const extra = useMemo(() => Array.from(new Set(hits.map((h) => h.msg))), [hits]);
+  const hitSet = useMemo(() => new Set(extra), [extra]);
   const plan = useMemo(
     () => planWindow(msgs.length, heights.current, view.top, view.h, { extra }),
     // ver 参与依赖：高度缓存回写后占位高度要跟着重算。
@@ -135,8 +139,9 @@ export function Transcript() {
       }
     }
     if (changed) setVer((v) => v + 1);
+    // msgs 参与依赖：折叠/展开会改变消息高度但条数不变，必须重新回测。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [msgs.length, tailStreaming, ver, planSig]);
+  }, [msgs, msgs.length, tailStreaming, ver, planSig]);
 
   // 滚动跟随走实时文本的独立通道：每帧只把滚动条钉到底，不引起任何 React 重渲染。
   // 挂在全局状态上的话，流式每一帧都要整树重渲染一次，跟随的代价远大于收益。
@@ -259,7 +264,7 @@ export function Transcript() {
                       className={"m-slot" + (i >= msgs.length - 3 ? " fresh" : "")}
                       data-si={i}
                     >
-                      <Message m={msgs[i]} index={i} />
+                      <Message m={msgs[i]} index={i} forceOpen={searching && hitSet.has(i)} />
                     </div>
                   ))}
                 </Fragment>
@@ -287,7 +292,16 @@ export function Transcript() {
 
 // 流式期间只有最后一条消息在变。不 memo 的话，每一帧都会把整条对话（可能上百条
 // 消息）重新协调一遍，这才是「回答时电脑发卡」的主要来源。
-const Message = memo(function Message({ m, index }: { m: Msg; index: number }) {
+const Message = memo(function Message({
+  m,
+  index,
+  forceOpen,
+}: {
+  m: Msg;
+  index: number;
+  /** 查找命中时临时展开折叠的回答（不改动消息自身的折叠状态）。 */
+  forceOpen?: boolean;
+}) {
   /** 被点击放大的附件图片；null 表示没有打开查看层。 */
   const [zoom, setZoom] = useState<string | null>(null);
 
@@ -350,16 +364,44 @@ const Message = memo(function Message({ m, index }: { m: Msg; index: number }) {
       </div>
     );
 
+  const text = m.t || "";
+  // 太短的回答折起来只会更碍事，只在明显偏长时提供折叠。
+  const canFold = !m.streaming && text.length > 260;
+  // 查找命中时临时展开，让高亮与跳转能落到真实文本上。
+  const folded = canFold && !!m.fold && !forceOpen;
   return (
-    <div className="msg ai">
+    <div className={"msg ai" + (folded ? " folded" : "") + (canFold ? " foldable" : "")}>
       <div className="av" aria-hidden="true">
         <BrandMark size={22} />
       </div>
       <div className="body" data-mi={index}>
-        <Markdown text={m.t || ""} streaming={m.streaming} err={m.err} />
+        {folded ? (
+          <button
+            className="foldbox"
+            title="展开这条回答"
+            onClick={() => toggleFold(index)}
+          >
+            <span className="ft">{text.replace(/\s+/g, " ").trim().slice(0, 200)}</span>
+            <span className="fh">
+              <Icon name="chev" />
+              已折叠 · 点击展开
+            </span>
+          </button>
+        ) : (
+          <Markdown text={text} streaming={m.streaming} err={m.err} />
+        )}
         {!m.streaming && (
           <div className="acts">
-            <CopyButton text={m.t || ""} />
+            <CopyButton text={text} />
+            {canFold && !forceOpen && (
+              <button
+                title={m.fold ? "展开回答" : "折叠回答"}
+                onClick={() => toggleFold(index)}
+              >
+                <Icon name="chev" className={"fchev" + (m.fold ? "" : " open")} />
+                <span>{m.fold ? "展开" : "折叠"}</span>
+              </button>
+            )}
             <button title="重试" onClick={() => retryFrom(index)}>
               <Icon name="refresh" />
               <span>重试</span>
