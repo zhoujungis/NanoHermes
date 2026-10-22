@@ -82,12 +82,44 @@ jobs:
             target/release/bundle/msi/*.msi
           if-no-files-found: error
 
-  # 推送 v* 标签时（例如 `git tag v0.1.0 && git push origin v0.1.0`），
-  # 测试与打包都通过后自动创建 GitHub Release，并附上 NSIS exe 与 MSI。
+  # 版本驱动发布：推送 main 时读取 gui/tauri.conf.json 里的版本号，
+  # 如果远端还没有对应的 v* tag，就在测试与打包都通过后自动打 tag 并发布
+  # Release。版本号没变的普通提交不会重复发版；也可以继续手动推送 v* tag。
+  version:
+    name: 检测版本 tag
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      release: ${{ steps.ver.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取版本并检查远端 tag
+        id: ver
+        shell: bash
+        run: |
+          version=$(jq -r '.version' gui/tauri.conf.json)
+          tag="v$version"
+          if git ls-remote --tags origin "refs/tags/$tag" | grep -q .; then
+            release=false
+          else
+            release=true
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "版本 $version，tag $tag，是否发布：$release"
+
+  # 手动推送 v* 标签仍可发布；main 上的版本号变化由 version 任务自动发布。
   release:
     name: 发布 GitHub Release
-    needs: package
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, package]
+    if: |
+      always() && needs.package.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.ref == 'refs/heads/main' && needs.version.outputs.release == 'true'))
     runs-on: windows-latest
     permissions:
       contents: write
@@ -98,10 +130,13 @@ jobs:
           name: NanoHermes-installers
           path: installers
 
+      # tag 不存在时，GitHub Releases API 会按 target_commitish 自动创建它。
       - name: 创建 Release 并上传安装包
         uses: softprops/action-gh-release@v2
         with:
-          name: NanoHermes ${{ github.ref_name }}
+          tag_name: ${{ needs.version.outputs.tag || github.ref_name }}
+          name: NanoHermes ${{ needs.version.outputs.tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           draft: false
           prerelease: false
