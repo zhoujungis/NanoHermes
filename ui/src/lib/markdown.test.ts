@@ -107,6 +107,18 @@ describe("sanitize", () => {
     expect(sanitize('<p onclick="x()" style="color:red">t</p>')).toBe("<p>t</p>");
   });
 
+  it("只保留渲染器自己的 class，全屏遮罩类被剥掉", () => {
+    // 模型输出 <div class="lightbox"> 会变成覆盖整个应用的遮罩。
+    expect(sanitize('<div class="lightbox">x</div>')).toBe("<div>x</div>");
+    expect(sanitize('<span class="cmd-back settings">x</span>')).toBe("<span>x</span>");
+    expect(sanitize('<code class="language-rust hljs">x</code>')).toContain(
+      'class="language-rust hljs"',
+    );
+    expect(sanitize('<pre class="language-js"><code class="evil">x</code></pre>')).toBe(
+      '<pre class="language-js"><code>x</code></pre>',
+    );
+  });
+
   it("http(s) 链接保留并补上 target/rel", () => {
     const html = sanitize('<a href="https://example.com">x</a>');
     expect(html).toContain('href="https://example.com"');

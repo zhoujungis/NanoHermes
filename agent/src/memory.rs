@@ -123,7 +123,11 @@ pub fn load(dir: &Path) -> Vec<Entry> {
                     Some(Entry {
                         kind,
                         text,
-                        source: x.get("source").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                        source: x
+                            .get("source")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         ts: x.get("ts").and_then(|t| t.as_u64()).unwrap_or(0),
                     })
                 })
@@ -145,8 +149,8 @@ pub fn save(dir: &Path, entries: &[Entry]) -> Result<(), String> {
             })
         })
         .collect();
-    let data = serde_json::to_string_pretty(&json!({ "entries": arr }))
-        .map_err(|e| e.to_string())?;
+    let data =
+        serde_json::to_string_pretty(&json!({ "entries": arr })).map_err(|e| e.to_string())?;
     std::fs::write(store_path(dir), data).map_err(|e| e.to_string())
 }
 
@@ -154,7 +158,9 @@ pub fn save(dir: &Path, entries: &[Entry]) -> Result<(), String> {
 fn normalize(text: &str) -> String {
     text.to_lowercase()
         .chars()
-        .filter(|c| !c.is_whitespace() && !"，。！？；：、,.!?;:()（）「」\"'“”【】…—-·*#`>~".contains(*c))
+        .filter(|c| {
+            !c.is_whitespace() && !"，。！？；：、,.!?;:()（）「」\"'“”【】…—-·*#`>~".contains(*c)
+        })
         .collect()
 }
 
@@ -170,7 +176,10 @@ pub fn remember(dir: &Path, kind: Kind, text: &str, source: &str) -> Result<bool
     let key = normalize(&text);
     for e in entries.iter_mut() {
         let old = normalize(&e.text);
-        if old == key || (key.len() >= 12 && old.contains(&key)) || (old.len() >= 12 && key.contains(&old)) {
+        if old == key
+            || (key.len() >= 12 && old.contains(&key))
+            || (old.len() >= 12 && key.contains(&old))
+        {
             e.ts = now();
             e.source = source.to_string();
             save(dir, &entries)?;
@@ -194,7 +203,8 @@ fn trim(entries: &mut Vec<Entry>) {
         let victim = entries
             .iter()
             .enumerate()
-            .max_by_key(|(_, e)| (e.kind.eviction_rank(), e.ts))
+            // 同一重要等级下先丢最旧的（Reverse 让 max_by_key 选中较小的时间戳）。
+            .max_by_key(|(_, e)| (e.kind.eviction_rank(), std::cmp::Reverse(e.ts)))
             .map(|(i, _)| i)
             .unwrap_or(0);
         entries.remove(victim);
@@ -218,12 +228,13 @@ pub fn tokenize(text: &str) -> Vec<String> {
     };
     let flush_cjk = |cjk: &mut String, out: &mut Vec<String>| {
         let chars: Vec<char> = cjk.chars().collect();
-        if chars.len() == 1 {
-            out.push(chars[0].to_string());
-        } else {
-            for w in chars.windows(2) {
-                out.push(w.iter().collect());
-            }
+        // 单字也要进索引：查询「错」「别」这类单字必须能命中多字文档。
+        // 二元词保留（精度更高），单字只作为补充召回。
+        for c in &chars {
+            out.push(c.to_string());
+        }
+        for w in chars.windows(2) {
+            out.push(w.iter().collect());
         }
         cjk.clear();
     };
@@ -248,10 +259,12 @@ pub fn tokenize(text: &str) -> Vec<String> {
 fn is_cjk(c: char) -> bool {
     matches!(c as u32,
         0x2E80..=0x2FFF   // CJK 部首
-        | 0x3040..=0x30FF // 假名
+        | 0x3040..=0x31FF // 假名 + 小假名扩展
         | 0x3400..=0x9FFF // 统一表意
         | 0xF900..=0xFAFF // 兼容表意
         | 0xAC00..=0xD7AF // 谚文
+        | 0xFF66..=0xFF9D // 半角片假名
+        | 0x20000..=0x2FA1F // 表意扩展 B–F
     )
 }
 
@@ -298,7 +311,9 @@ pub fn search(entries: &[Entry], query: &str, top_k: usize) -> Vec<(f64, usize)>
         }
         let mut score = 0f64;
         for term in &q_terms {
-            let Some(f) = tf.get(term.as_str()) else { continue };
+            let Some(f) = tf.get(term.as_str()) else {
+                continue;
+            };
             let f = *f as f64;
             let n_q = *df.get(term.as_str()).unwrap_or(&1) as f64;
             let idf = (1.0 + (n - n_q + 0.5) / (n_q + 0.5)).ln();
@@ -419,10 +434,12 @@ pub fn distill(cfg: &Config, excerpt: &str) -> Result<Vec<(Kind, String)>, Strin
 /// 不认识的 kind 一律按「事实」处理，文本为空的条目丢弃。
 pub fn parse_distill(text: &str) -> Vec<(Kind, String)> {
     let trimmed = text.trim();
+    // `find` may land after `rfind` (e.g. the model writes "…] … ["), and slicing
+    // a reversed range panics.
     let json_part = if let (Some(a), Some(b)) = (trimmed.find('['), trimmed.rfind(']')) {
-        trimmed[a..=b].to_string()
+        trimmed.get(a..=b).unwrap_or(trimmed).to_string()
     } else if let (Some(a), Some(b)) = (trimmed.find('{'), trimmed.rfind('}')) {
-        trimmed[a..=b].to_string()
+        trimmed.get(a..=b).unwrap_or(trimmed).to_string()
     } else {
         trimmed.to_string()
     };
@@ -462,9 +479,18 @@ pub fn excerpt_from(messages: &[Value], max_chars: usize) -> String {
         let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
         let body = match role {
             "system" => continue,
-            "tool" => format!("[tool result] {}", content_text(m.get("content").unwrap_or(&Value::Null))),
+            "tool" => format!(
+                "[tool result] {}",
+                content_text(m.get("content").unwrap_or(&Value::Null))
+            ),
             "assistant" => {
-                if m.get("tool_calls").is_some() && m.get("content").and_then(|c| c.as_str()).unwrap_or("").trim().is_empty() {
+                if m.get("tool_calls").is_some()
+                    && m.get("content")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty()
+                {
                     continue;
                 }
                 content_text(m.get("content").unwrap_or(&Value::Null))
@@ -492,7 +518,9 @@ pub fn content_text(content: &Value) -> String {
             .iter()
             .filter_map(|p| {
                 if p.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                    p.get("text")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
@@ -547,7 +575,12 @@ pub fn search_tool(args: &Value, dir: &Path) -> Result<String, String> {
     let mut out = String::from("相关记忆：\n");
     for (score, i) in hits {
         let e = &entries[i];
-        out.push_str(&format!("- [{:.2}] [{}] {}\n", score, e.kind.label(), e.text));
+        out.push_str(&format!(
+            "- [{:.2}] [{}] {}\n",
+            score,
+            e.kind.label(),
+            e.text
+        ));
     }
     Ok(out)
 }
@@ -605,7 +638,10 @@ mod tests {
     fn trims_oldest_lessons_before_touching_preferences() {
         let mut entries = vec![entry(Kind::Preference, "用户偏好简洁的中文回复")];
         for i in 0..MAX_ENTRIES {
-            entries.push(entry(Kind::Lesson, &format!("经验{i}：某个只对本次有意义的细节")));
+            entries.push(entry(
+                Kind::Lesson,
+                &format!("经验{i}：某个只对本次有意义的细节"),
+            ));
         }
         trim(&mut entries);
         assert_eq!(entries.len(), MAX_ENTRIES);
@@ -655,7 +691,8 @@ mod tests {
         assert_eq!(parsed[0].0, Kind::Preference);
         assert_eq!(parsed[1].0, Kind::Fact);
 
-        let wrapped = r#"前置废话 {"memories": [{"kind": "correction", "text": "不要用 emoji"}]} 后置废话"#;
+        let wrapped =
+            r#"前置废话 {"memories": [{"kind": "correction", "text": "不要用 emoji"}]} 后置废话"#;
         let parsed = parse_distill(wrapped);
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].0, Kind::Correction);
@@ -667,9 +704,18 @@ mod tests {
     fn distill_gate_skips_small_talk_but_keeps_corrections() {
         assert!(!worth_distilling("继续", false));
         assert!(!worth_distilling("好的", false));
-        assert!(worth_distilling("不对，界面不要用模板风格，要高级简洁", false));
-        assert!(worth_distilling("请把整个项目的构建脚本与发布流程梳理一遍并写成文档", false));
-        assert!(worth_distilling("继续", true), "做过工具调用的轮次总是要提炼");
+        assert!(worth_distilling(
+            "不对，界面不要用模板风格，要高级简洁",
+            false
+        ));
+        assert!(worth_distilling(
+            "请把整个项目的构建脚本与发布流程梳理一遍并写成文档",
+            false
+        ));
+        assert!(
+            worth_distilling("继续", true),
+            "做过工具调用的轮次总是要提炼"
+        );
     }
 
     #[test]
@@ -682,7 +728,11 @@ mod tests {
         .unwrap();
         assert!(saved.contains("已记下"));
         // 重复写入走去重分支
-        let dup = save_tool(&json!({ "kind": "preference", "text": "回复使用中文" }), &dir).unwrap();
+        let dup = save_tool(
+            &json!({ "kind": "preference", "text": "回复使用中文" }),
+            &dir,
+        )
+        .unwrap();
         assert!(dup.contains("重复"));
 
         let found = search_tool(&json!({ "query": "中文回复" }), &dir).unwrap();

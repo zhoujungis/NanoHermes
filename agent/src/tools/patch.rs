@@ -27,6 +27,7 @@ pub fn apply_patch(args: &Value, ctx: &Ctx) -> Result<String, String> {
     if updated == original {
         return Ok("patch applied but file content unchanged".to_string());
     }
+    super::check_write(ctx, &full)?;
     fs::write(&full, &updated).map_err(|e| format!("{}: {e}", full.display()))?;
 
     let added = updated.lines().count() as isize - original.lines().count() as isize;
@@ -46,13 +47,19 @@ fn count_hunks(diff: &str) -> usize {
 /// current file contents and replaces it with the new side.
 pub fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> {
     let mut lines: Vec<String> = original.split('\n').map(|s| s.to_string()).collect();
-    let diff_lines: Vec<&str> = diff.split('\n').collect();
+    let mut diff_lines: Vec<&str> = diff.split('\n').collect();
+    // Drop the empty element produced by the trailing newline: treating it as a
+    // context line turns a pure-insertion hunk (`-N,0`) into a search for an
+    // empty line, which lands the insertion at the wrong place.
+    if diff.ends_with('\n') && diff_lines.last() == Some(&"") {
+        diff_lines.pop();
+    }
 
     let mut i = 0;
     let mut applied = 0;
     while i < diff_lines.len() {
-        let l = diff_lines[i];
-        if !l.starts_with("@@ ") {
+        let header = diff_lines[i];
+        if !header.starts_with("@@ ") {
             i += 1;
             continue;
         }
@@ -80,8 +87,12 @@ pub fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> 
                 i += 1;
                 continue;
             }
-            let prefix = dl.chars().next().unwrap();
-            let rest = dl[1..].to_string();
+            // Never slice at byte 1: diff context can legitimately start with a
+            // multi-byte character (CJK, emoji, ideographic space) and `dl[1..]`
+            // would panic (and, with panic=abort, kill the whole process).
+            let mut chars = dl.chars();
+            let prefix = chars.next().unwrap();
+            let rest = chars.as_str().to_string();
             match prefix {
                 ' ' => {
                     old_block.push(rest.clone());
@@ -94,6 +105,16 @@ pub fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> 
             i += 1;
         }
 
+        // A pure insertion (`-0,0` or `-N,0`) has no context to search for; the
+        // old-side start line from the header is the insertion point.
+        if old_block.is_empty() {
+            let pos = hunk_old_start(header)
+                .unwrap_or(lines.len())
+                .min(lines.len());
+            lines.splice(pos..pos, new_block);
+            applied += 1;
+            continue;
+        }
         let pos = find_block(&lines, &old_block).ok_or_else(|| {
             format!(
                 "hunk context not found in file: {}",
@@ -108,6 +129,12 @@ pub fn apply_unified_diff(original: &str, diff: &str) -> Result<String, String> 
         return Err("no `@@` hunks found in the diff".to_string());
     }
     Ok(lines.join("\n"))
+}
+
+/// Old-side start line from a hunk header: `@@ -12,3 +12,4 @@` → 12.
+fn hunk_old_start(header: &str) -> Option<usize> {
+    let token = header.split_whitespace().find(|t| t.starts_with('-'))?;
+    token.get(1..)?.split(',').next()?.parse().ok()
 }
 
 fn find_block(hay: &[String], needle: &[String]) -> Option<usize> {
@@ -151,6 +178,31 @@ mod tests {
         let diff = "@@ -1,2 +1,2 @@\n-a\n+A\n b\n@@ -4,2 +4,2 @@\n d\n-e\n+E\n";
         let out = apply_unified_diff(orig, diff).unwrap();
         assert_eq!(out, "A\nb\nc\nd\nE\n");
+    }
+
+    #[test]
+    fn pure_insertion_hunk() {
+        // `-2,0` means "insert after line 2", with no context to search for.
+        let orig = "a\nb\n";
+        let diff = "@@ -2,0 +3,1 @@\n+new\n";
+        let out = apply_unified_diff(orig, diff).unwrap();
+        assert_eq!(out, "a\nb\nnew\n");
+    }
+
+    #[test]
+    fn append_at_start() {
+        let orig = "a\n";
+        let diff = "@@ -0,0 +1,1 @@\n+first\n";
+        let out = apply_unified_diff(orig, diff).unwrap();
+        assert_eq!(out, "first\na\n");
+    }
+
+    #[test]
+    fn non_ascii_context_does_not_panic() {
+        let orig = "第一行\n第二行\n";
+        let diff = "@@ -1,2 +1,2 @@\n 第一行\n-第二行\n+改过的行\n";
+        let out = apply_unified_diff(orig, diff).unwrap();
+        assert_eq!(out, "第一行\n改过的行\n");
     }
 
     #[test]

@@ -17,14 +17,15 @@ pub enum PermissionMode {
     /// Goal-directed, unattended work: every tool is available and nothing asks
     /// for confirmation, so the agent keeps going until the objective is met.
     Goal,
-    /// Diagnosis: reads files and runs commands (to reproduce the problem) but
-    /// may not modify anything, so a broken state is never made worse.
+    /// Diagnosis: reads files and runs commands to reproduce the problem, while
+    /// the file-editing tools are blocked. Shell commands can still write, so
+    /// pair this with `--sandbox read-only` for a hard filesystem guarantee.
     Debug,
 }
 
 impl PermissionMode {
     pub fn parse(s: &str) -> Result<Self, String> {
-        match s.to_ascii_lowercase().as_str() {
+        match s.trim().to_ascii_lowercase().as_str() {
             "default" => Ok(PermissionMode::Default),
             "accept-edits" | "acceptedits" => Ok(PermissionMode::AcceptEdits),
             "plan" => Ok(PermissionMode::Plan),
@@ -601,8 +602,9 @@ impl Config {
                 self.permission_mode
             ));
         }
-        // Deny list always wins.
-        if self.disallowed_tools.iter().any(|t| t == name) {
+        // Deny list always wins. `*` denies every tool, including tools that are
+        // discovered later (MCP servers, memory) rather than enumerated by name.
+        if self.disallowed_tools.iter().any(|t| t == "*" || t == name) {
             return Err(format!("tool `{name}` is disallowed by configuration"));
         }
         // Allow list: if set, only listed tools may run.
@@ -623,4 +625,31 @@ fn env_first(keys: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deny_list_wildcard_blocks_every_tool() {
+        let cfg = Config {
+            disallowed_tools: vec!["*".to_string()],
+            ..Config::default()
+        };
+        assert!(cfg.check_tool("read_file").is_err());
+        // Tools discovered at runtime (MCP / memory) are covered too.
+        assert!(cfg.check_tool("memory_search").is_err());
+        assert!(cfg.check_tool("some_mcp_tool").is_err());
+    }
+
+    #[test]
+    fn named_deny_still_only_blocks_that_tool() {
+        let cfg = Config {
+            disallowed_tools: vec!["run_command".to_string()],
+            ..Config::default()
+        };
+        assert!(cfg.check_tool("run_command").is_err());
+        assert!(cfg.check_tool("read_file").is_ok());
+    }
 }

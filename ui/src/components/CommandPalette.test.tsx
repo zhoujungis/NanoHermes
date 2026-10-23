@@ -180,12 +180,13 @@ describe("键盘", () => {
 });
 
 describe("条件隐藏", () => {
-  it("云端任务不出现停止项与模式分组", () => {
+  it("云端任务可以停止，但不出现模式分组", () => {
     m.task.location = "cloud";
     m.state.busy = true;
     renderPalette();
 
-    expect(screen.queryByText("停止正在执行的任务")).toBeNull();
+    // 云端在读到下一个 NDJSON 事件时会发现停止标志，所以停止项不再隐藏。
+    expect(screen.getByText("停止正在执行的任务")).toBeInTheDocument();
     expect(screen.queryByText("切换到 Plan 模式")).toBeNull();
   });
 

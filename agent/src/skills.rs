@@ -79,10 +79,20 @@ pub fn discover_in(workspace: &Path, home: Option<&Path>) -> Vec<Skill> {
     out
 }
 
+/// Read at most `limit` bytes: SKILL.md comes from the workspace, so a huge file
+/// must not be fully read before the size cap is applied.
+fn read_head(path: &Path, limit: u64) -> Option<String> {
+    use std::io::Read as _;
+    let file = fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.take(limit).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// Read a skill's name and description from its frontmatter. Falls back to the
 /// directory name and the first body line when the frontmatter is missing.
 fn read_manifest(path: &Path, fallback_name: &str) -> Option<(String, String)> {
-    let text = fs::read_to_string(path).ok()?;
+    let text = read_head(path, 64 * 1024)?;
     let (fields, body) = split_frontmatter(&text);
     let field = |key: &str| {
         fields
@@ -103,7 +113,8 @@ fn read_manifest(path: &Path, fallback_name: &str) -> Option<(String, String)> {
 
 /// Read a skill's instructions (frontmatter stripped, size-capped).
 pub fn load_body(path: &Path) -> Result<String, String> {
-    let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = read_head(path, 64 * 1024)
+        .ok_or_else(|| format!("{}: could not read skill", path.display()))?;
     let (_, body) = split_frontmatter(&text);
     let body = body.trim();
     if body.is_empty() {

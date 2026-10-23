@@ -3,6 +3,7 @@
 //! client and honour the standard proxy environment variables.
 
 use std::io::Read;
+use std::net::ToSocketAddrs;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -78,26 +79,154 @@ pub fn web_search(args: &Value, _ctx: &Ctx) -> Result<String, String> {
     Ok(out.trim_end().to_string())
 }
 
+/// Redirects are followed manually so every hop is re-validated; ureq's built-in
+/// follower would happily hop from a public host to `127.0.0.1`.
+const MAX_REDIRECTS: usize = 5;
+
+/// Reject loopback/private/link-local targets. `web_fetch` takes URLs from the
+/// model, which takes them from untrusted pages — without this it is a ready
+/// SSRF primitive for local admin ports and cloud metadata endpoints.
+fn validate_target(url: &str) -> Result<(), String> {
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| format!("invalid URL `{url}`"))?;
+    if scheme != "http" && scheme != "https" {
+        return Err(format!(
+            "unsupported scheme `{scheme}` (expected http/https)"
+        ));
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(bracketed) = hostport.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        hostport.split(':').next().unwrap_or("")
+    };
+    if host.is_empty() {
+        return Err(format!("URL `{url}` has no host"));
+    }
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost"
+        || lower.ends_with(".localhost")
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal")
+    {
+        return Err(format!("refusing to fetch local address `{host}`"));
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_forbidden_ip(ip) {
+            return Err(format!("refusing to fetch private/local address `{host}`"));
+        }
+        return Ok(());
+    }
+    let port = if scheme == "https" { 443 } else { 80 };
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("could not resolve `{host}`: {e}"))?;
+    for addr in addrs {
+        if is_forbidden_ip(addr.ip()) {
+            return Err(format!("refusing to fetch private/local address `{host}`"));
+        }
+    }
+    Ok(())
+}
+
+fn is_forbidden_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || o[0] == 0
+                // CGNAT 100.64.0.0/10
+                || (o[0] == 100 && (64..=127).contains(&o[1]))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_forbidden_ip(IpAddr::V4(v4));
+            }
+            let s = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (s[0] & 0xffc0) == 0xfe80 // link local fe80::/10
+        }
+    }
+}
+
+/// Resolve a (possibly relative) `Location` against the URL that produced it.
+/// Only http(s) and the common relative forms are supported.
+fn resolve_url(base: &str, location: &str) -> String {
+    let loc = location.trim();
+    if loc.starts_with("http://") || loc.starts_with("https://") {
+        return loc.to_string();
+    }
+    let (scheme, rest) = match base.split_once("://") {
+        Some(v) => v,
+        None => return loc.to_string(),
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    if let Some(network) = loc.strip_prefix("//") {
+        return format!("{scheme}://{network}");
+    }
+    if loc.starts_with('/') {
+        return format!("{scheme}://{authority}{loc}");
+    }
+    let dir = match path.rfind('/') {
+        Some(i) => &path[..=i],
+        None => "/",
+    };
+    format!("{scheme}://{authority}{dir}{loc}")
+}
+
 /// GET `url` and return `(content_type, kept_bytes, total_bytes)`.
 fn http_get(url: &str, timeout_secs: u64) -> Result<(String, Vec<u8>, usize), String> {
-    let mut builder = ureq::AgentBuilder::new().timeout(Duration::from_secs(timeout_secs));
-    if let Some(p) = crate::llm::proxy_for(url) {
-        builder = builder.proxy(p);
-    }
-    let agent = builder.build();
-
-    let resp = match agent.get(url).set("User-Agent", USER_AGENT).call() {
-        Ok(r) => r,
-        Err(ureq::Error::Status(code, r)) => {
-            let detail = r.into_string().unwrap_or_default();
-            return Err(format!(
-                "HTTP {code} fetching {url}: {}",
-                clip_chars(detail.trim(), 300)
-            ));
+    let mut current = url.to_string();
+    for _ in 0..=MAX_REDIRECTS {
+        validate_target(&current)?;
+        let mut builder = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(timeout_secs))
+            .redirects(0);
+        if let Some(p) = crate::llm::proxy_for(&current) {
+            builder = builder.proxy(p);
         }
-        Err(e) => return Err(format!("request to {url} failed: {e}")),
-    };
+        let agent = builder.build();
 
+        match agent.get(&current).set("User-Agent", USER_AGENT).call() {
+            Ok(resp) => return read_body(resp, &current),
+            Err(ureq::Error::Status(code, resp)) if (300..400).contains(&code) => {
+                let location = resp.header("Location").map(str::to_string).ok_or_else(|| {
+                    format!("HTTP {code} from {current} without a Location header")
+                })?;
+                current = resolve_url(&current, &location);
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                // Bounded read: a broken gateway must not stream a huge error
+                // body into memory just to show 300 characters of it.
+                let mut buf = Vec::new();
+                let _ = resp.into_reader().take(8 * 1024).read_to_end(&mut buf);
+                let detail = String::from_utf8_lossy(&buf);
+                return Err(format!(
+                    "HTTP {code} fetching {current}: {}",
+                    clip_chars(detail.trim(), 300)
+                ));
+            }
+            Err(e) => return Err(format!("request to {current} failed: {e}")),
+        }
+    }
+    Err(format!("too many redirects fetching {url}"))
+}
+
+fn read_body(resp: ureq::Response, url: &str) -> Result<(String, Vec<u8>, usize), String> {
     let ctype = resp.header("Content-Type").unwrap_or("").to_string();
     let mut reader = resp.into_reader();
     let mut kept: Vec<u8> = Vec::new();
@@ -362,7 +491,13 @@ fn parse_ddg_results(html: &str, count: usize) -> Vec<SearchResult> {
             .find("</a>")
             .map(|r| tag_end + r)
             .unwrap_or(tag_end);
-        let title = html_to_text(&html[tag_end + 1..title_end]);
+        // A truncated/malformed page may have no closing `</a>`; slicing
+        // tag_end+1..tag_end would panic on the reversed range.
+        let title = if title_end > tag_end {
+            html_to_text(&html[tag_end + 1..title_end])
+        } else {
+            String::new()
+        };
 
         let mut snippet = String::new();
         if let Some(srel) = html[title_end..].find("result__snippet") {
@@ -552,5 +687,46 @@ mod tests {
         assert_eq!(extract_attr(tag, "href").as_deref(), Some("https://x.y/z"));
         assert_eq!(extract_attr(tag, "class").as_deref(), Some("result__a"));
         assert_eq!(extract_attr(tag, "missing"), None);
+    }
+
+    #[test]
+    fn refuses_local_and_private_targets() {
+        for bad in [
+            "http://127.0.0.1:8787/",
+            "http://localhost/",
+            "http://foo.localhost/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.5/",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://[::1]/",
+            "http://[fd00::1]/",
+            "ftp://example.com/",
+        ] {
+            assert!(validate_target(bad).is_err(), "{bad} should be refused");
+        }
+        // A public literal IP needs no DNS and must pass.
+        assert!(validate_target("http://8.8.8.8/").is_ok());
+    }
+
+    #[test]
+    fn resolves_redirect_locations() {
+        assert_eq!(
+            resolve_url("https://a.com/x/y?q=1", "/z"),
+            "https://a.com/z"
+        );
+        assert_eq!(resolve_url("https://a.com/x/y", "z"), "https://a.com/x/z");
+        assert_eq!(resolve_url("http://a.com/x", "//b.com/y"), "http://b.com/y");
+        assert_eq!(
+            resolve_url("http://a.com/x", "https://c.com/y"),
+            "https://c.com/y"
+        );
+    }
+
+    #[test]
+    fn truncated_result_title_does_not_panic() {
+        // No closing </a> after the marker: the old code sliced a reversed range.
+        let html = r#"<a class="result__a" href="https://x.y/z">unterminated"#;
+        let _ = parse_ddg_results(html, 3);
     }
 }

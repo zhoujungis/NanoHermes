@@ -130,10 +130,9 @@ pub fn todo_write(args: &Value, ctx: &Ctx) -> Result<String, String> {
         });
     }
 
-    let rendered = ctx.todos.replace(items);
-    // Surface the plan to the user as well as to the model.
-    println!("{rendered}");
-    Ok(rendered)
+    // The caller decides how to surface the plan: stdout must stay clean in
+    // `json` / `stream-json` mode and in daemon mode, so this tool only returns it.
+    Ok(ctx.todos.replace(items))
 }
 
 /// `todo_read` — return the current task list.

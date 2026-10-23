@@ -79,12 +79,29 @@ pub fn chat<F: FnMut(&str)>(
 
     // Retry transient failures with exponential backoff; once retries are
     // exhausted, fall back to `fallback_model` (if configured).
+    //
+    // Never retry after text was already streamed to the user: the retry would
+    // replay the prefix and the answer would appear duplicated (and, in
+    // stream-json mode, emit duplicate deltas to the client).
+    let emitted = std::cell::Cell::new(false);
+    let mut sink = |text: &str| {
+        if !text.is_empty() {
+            emitted.set(true);
+        }
+        on_text(text);
+    };
     let mut attempt: u32 = 0;
     loop {
-        match chat_with_model(cfg, build_body(&cfg.model), &mut on_text) {
+        match chat_with_model(cfg, build_body(&cfg.model), &mut sink) {
             Ok(turn) => return Ok(turn),
             Err(e) => {
-                if is_retryable_error(&e) && attempt < cfg.max_retries {
+                let retryable = is_retryable_error(&e);
+                if retryable && emitted.get() {
+                    return Err(format!(
+                        "{e} (partial response was already streamed; not retrying)"
+                    ));
+                }
+                if retryable && attempt < cfg.max_retries {
                     attempt += 1;
                     let delay = backoff_ms(cfg.retry_base_ms, attempt);
                     eprintln!(
@@ -95,9 +112,9 @@ pub fn chat<F: FnMut(&str)>(
                     continue;
                 }
                 if let Some(fallback) = &cfg.fallback_model {
-                    if is_retryable_error(&e) {
+                    if retryable {
                         eprintln!("note: primary model failed ({e}); retrying with fallback model `{fallback}`");
-                        return chat_with_model(cfg, build_body(fallback), &mut on_text);
+                        return chat_with_model(cfg, build_body(fallback), &mut sink);
                     }
                 }
                 return Err(e);
@@ -142,7 +159,12 @@ fn chat_with_model<F: FnMut(&str)>(
     let resp = match req.send_json(body) {
         Ok(r) => r,
         Err(ureq::Error::Status(code, r)) => {
-            let detail = r.into_string().unwrap_or_default();
+            // Read a bounded prefix: an error body from a broken gateway must
+            // not be buffered whole before it is truncated to 800 chars.
+            use std::io::Read as _;
+            let mut buf = Vec::new();
+            let _ = r.into_reader().take(8 * 1024).read_to_end(&mut buf);
+            let detail = String::from_utf8_lossy(&buf);
             return Err(format!("HTTP {code} from API: {}", truncate(&detail, 800)));
         }
         Err(e) => return Err(format!("request failed: {e}")),
@@ -217,6 +239,8 @@ fn read_stream(
     let mut turn = AssistantTurn::default();
     let reader = BufReader::new(resp.into_reader());
     let mut line = String::new();
+    let mut saw_done = false;
+    let mut saw_frame = false;
 
     for l in reader.lines() {
         line.clear();
@@ -233,12 +257,14 @@ fn read_stream(
             None => continue, // event/id/retry fields
         };
         if data == "[DONE]" {
+            saw_done = true;
             break;
         }
         let v: Value = match serde_json::from_str(data) {
             Ok(v) => v,
             Err(_) => continue, // tolerate partial / unknown frames
         };
+        saw_frame = true;
         if let Some(err) = v.get("error") {
             return Err(format!("API error: {err}"));
         }
@@ -261,8 +287,22 @@ fn read_stream(
         accumulate_tool_calls(delta.get("tool_calls"), &mut turn.tool_calls);
     }
 
+    // A 200 response that is not an event stream at all (proxy error page,
+    // captive portal) used to look like an empty successful answer. Requiring at
+    // least one frame or a `[DONE]` marker turns that into a visible error.
+    if !saw_done && !saw_frame {
+        return Err(
+            "stream ended without any JSON events — the endpoint may not support streaming"
+                .to_string(),
+        );
+    }
     Ok(turn)
 }
+
+/// Cap on streamed tool-call slots. `index` comes from the network and must not
+/// drive an allocation: a hostile/buggy endpoint could otherwise request
+/// hundreds of GB (or overflow `idx + 1`) with one frame.
+const MAX_STREAM_TOOL_CALLS: usize = 64;
 
 /// OpenAI streams tool calls incrementally: each delta carries an `index` plus a
 /// fragment of `function.arguments`. We merge fragments into a slot per index.
@@ -272,6 +312,9 @@ fn accumulate_tool_calls(tcs: Option<&Value>, out: &mut Vec<ToolCall>) {
     };
     for tc in arr {
         let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+        if idx >= MAX_STREAM_TOOL_CALLS {
+            continue;
+        }
         if out.len() <= idx {
             out.resize(idx + 1, ToolCall::default());
         }

@@ -9,13 +9,13 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use base64::Engine;
 use agent::{
     agent::{load_session_file, save_session_file},
     config, mcp, sandbox,
     ui::UiEvent,
     user_content, Agent, Config,
 };
+use base64::Engine;
 use serde_json::{json, Value};
 
 fn main() {
@@ -42,7 +42,9 @@ fn main() {
     };
 
     if cfg.api_key.trim().is_empty() {
-        eprintln!("warning: no API key set (NANOHERMES_API_KEY / OPENAI_API_KEY); requests may fail");
+        eprintln!(
+            "warning: no API key set (NANOHERMES_API_KEY / OPENAI_API_KEY); requests may fail"
+        );
     }
 
     // Load sub-agent definitions if a config was provided.
@@ -636,6 +638,47 @@ fn run_daemon(mut agent: Agent) {
     }
 }
 
+/// Request bodies carry prompts and optionally base64 image data URLs (up to
+/// four images). Cap them so an unauthenticated or buggy client cannot make the
+/// single-threaded daemon allocate without bound.
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Upper bound on distinct in-memory conversations, so a client cannot grow the
+/// map (and the session directory) without limit.
+const MAX_DAEMON_SESSIONS: usize = 256;
+
+/// Session ids become file names, so only a conservative alphabet is accepted.
+/// This blocks `../`, absolute paths, NUL bytes and Windows device names.
+fn valid_session_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > 64 || id.starts_with('.') {
+        return false;
+    }
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+    {
+        return false;
+    }
+    let stem = id.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit());
+    !device
+}
+
+/// Write a small JSON response (used for error paths).
+fn write_json_error(stream: &mut std::net::TcpStream, status: &str, message: &str) {
+    use std::io::Write;
+    let body = json!({ "error": message }).to_string();
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
+}
+
 /// Parse one HTTP request from the stream, run the agent, and write the response.
 fn handle_daemon_request(
     agent: &mut Agent,
@@ -697,13 +740,32 @@ fn handle_daemon_request(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "default".to_string());
     let session_id = session_id.trim().to_string();
+    if !valid_session_id(&session_id) {
+        write_json_error(
+            stream,
+            "400 Bad Request",
+            "invalid X-Session-Id: use 1-64 characters from [A-Za-z0-9._-], not starting with '.'",
+        );
+        return Ok(());
+    }
+    if !store.sessions.contains_key(&session_id) && store.sessions.len() >= MAX_DAEMON_SESSIONS {
+        write_json_error(
+            stream,
+            "429 Too Many Requests",
+            "too many sessions; reuse an existing X-Session-Id",
+        );
+        return Ok(());
+    }
 
-    // Extract Content-Length.
-    let mut content_len: usize = 0;
-    for line in &lines {
-        if let Some(v) = line.strip_prefix("Content-Length:") {
-            content_len = v.trim().parse().unwrap_or(0);
-        }
+    // Header names are case-insensitive, so go through the same helper as
+    // every other header. A strict `Content-Length:` prefix check dropped the
+    // body of clients that send `content-length:`.
+    let content_len = header_value(&lines, "content-length")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    if content_len > MAX_BODY_BYTES {
+        write_json_error(stream, "413 Payload Too Large", "request body too large");
+        return Ok(());
     }
 
     // Find the byte offset of the body (after \r\n\r\n).
@@ -719,6 +781,11 @@ fn handle_daemon_request(
             break;
         }
         body.extend_from_slice(&buf[..n]);
+        // Also bound bodies whose declared length was absent or lied.
+        if body.len() > MAX_BODY_BYTES {
+            write_json_error(stream, "413 Payload Too Large", "request body too large");
+            return Ok(());
+        }
     }
 
     let (prompt, images, want_stream) = if body.is_empty() {
@@ -835,7 +902,8 @@ fn stream_turn(
     let header = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {NDJSON_CONTENT_TYPE}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
     );
-    out.write_all(header.as_bytes()).map_err(|e| e.to_string())?;
+    out.write_all(header.as_bytes())
+        .map_err(|e| e.to_string())?;
     out.flush().map_err(|e| e.to_string())?;
     let out = Arc::new(Mutex::new(out));
 
@@ -997,31 +1065,10 @@ fn extract_config_path(args: &[String]) -> Option<PathBuf> {
 fn apply_agent_mode(cfg: &mut Config, mode: &str) -> Result<(), String> {
     match mode.to_ascii_lowercase().as_str() {
         "minimal" => {
+            // `*` also covers tools that only appear at runtime (MCP servers,
+            // long-term memory), which an explicit name list would miss.
             cfg.allowed_tools = vec![];
-            cfg.disallowed_tools = vec![
-                "read_file".into(),
-                "write_file".into(),
-                "edit_file".into(),
-                "apply_patch".into(),
-                "list_dir".into(),
-                "grep".into(),
-                "glob".into(),
-                "run_command".into(),
-                "task_output".into(),
-                "task_list".into(),
-                "task_kill".into(),
-                "web_fetch".into(),
-                "web_search".into(),
-                "todo_write".into(),
-                "todo_read".into(),
-                "git_status".into(),
-                "git_diff".into(),
-                "git_log".into(),
-                "git_commit".into(),
-                "skill".into(),
-                "subagent".into(),
-                "agent_list".into(),
-            ];
+            cfg.disallowed_tools = vec!["*".into()];
         }
         "create" => {
             cfg.allowed_tools = vec![
@@ -1334,11 +1381,13 @@ OPTIONS:
         --retry-base-ms <MS>    Base backoff delay between retries (default 500)
         --no-stream             Disable streaming (buffered response)
         --ask                   Confirm every shell command before running (untrusted)
-        --approval-policy <P>   never | on-request | untrusted (default: untrusted with -y)
-        --sandbox <MODE>        off | read-only | workspace-write (Linux/Landlock)
+        --approval-policy <P>   never | on-request | untrusted (default: never, no prompting)
+        --sandbox <MODE>        off | read-only | workspace-write
+                                (file tools: all platforms; commands: Linux Landlock)
     -y, --yes                   Auto-approve shell commands (default)
         --permission-mode <M>   default | accept-edits | plan | goal | debug
-                                (plan/debug = read-only, goal = unattended)
+                                (plan = read-only, debug = no edits but commands run,
+                                 goal = unattended)
         --allowed-tools <LIST>  Comma-separated allow-list of tool names
         --disallowed-tools <L>  Comma-separated deny-list of tool names
         --output-format <FMT>   text (default) | json | stream-json (newline-delimited JSON)
@@ -1349,7 +1398,8 @@ OPTIONS:
         --daemon-port <PORT>    Daemon listen port (default 8787)
         --daemon-bind <ADDR>    Daemon bind address (default 127.0.0.1)
         --daemon-token <TOKEN>  Bearer token required for daemon requests (or NANOHERMES_DAEMON_TOKEN)
-        --config <FILE>         Load settings from a JSON config file (also ~/.nanohermes/config.json)
+        --config <FILE>         Load settings from a JSON config file
+                                (also NANOHERMES_CONFIG or ~/.nanohermes/config.json)
         --mode <MODE>           Agent preset: minimal (no tools) | create (file tools only)
         --print-config          Print resolved config as JSON and exit
     -h, --help                  Show this help
@@ -1473,5 +1523,32 @@ mod tests {
         assert!(build_content("x", &[dir.join("nope.png")]).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_ids_cannot_escape_the_session_directory() {
+        for ok in ["default", "project-alpha", "a_b.c", "Team42"] {
+            assert!(valid_session_id(ok), "{ok} should be accepted");
+        }
+        let long = "x".repeat(65);
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../evil",
+            "a/b",
+            "a\\b",
+            "/etc/passwd",
+            "C:evil",
+            ".hidden",
+            "nul",
+            "CON",
+            "COM1",
+            "with space",
+            "semi;colon",
+            long.as_str(),
+        ] {
+            assert!(!valid_session_id(bad), "{bad:?} should be rejected");
+        }
     }
 }

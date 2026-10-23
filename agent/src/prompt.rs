@@ -42,7 +42,12 @@ Workspace root: {root}
 
     // A user-selected persona adds to the built-in rules rather than replacing
     // them, so the safety and tool-usage guidance above is always in force.
-    if let Some(extra) = cfg.system_prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(extra) = cfg
+        .system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         out.push_str(
             "\nAdditional instructions from the user (a persona) — follow them on top of the rules above:\n",
         );
@@ -112,7 +117,7 @@ fn project_docs(workspace: &Path) -> Option<String> {
         if !seen.insert(key) {
             continue;
         }
-        if let Ok(text) = std::fs::read_to_string(&file) {
+        if let Some(text) = read_head(&file, 64 * 1024) {
             if !text.trim().is_empty() {
                 parts.push(format!("--- {} ---\n{}", file.display(), text.trim()));
             }
@@ -132,6 +137,16 @@ fn project_docs(workspace: &Path) -> Option<String> {
         joined.push_str("\n… project guidance truncated");
     }
     Some(joined)
+}
+
+/// Read at most `limit` bytes. Project guidance comes from the repo, so a huge
+/// or growing AGENTS.md must not be slurped into memory before truncation.
+fn read_head(path: &Path, limit: u64) -> Option<String> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.take(limit).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 #[cfg(test)]

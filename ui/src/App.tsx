@@ -35,6 +35,9 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // 同一个 editingId 可能来自侧栏双击或顶栏按钮；必须记住来源，否则两处会同时
+  // 渲染输入框（双击侧栏标题却在顶栏弹出重命名）。
+  const [editingWhere, setEditingWhere] = useState<"sidebar" | "bar" | null>(null);
   const [menu, setMenu] = useState<{ id: string; rect: DOMRect } | null>(null);
   /** 文件选择器：onPick 不传时选中即加入引用，传了则由调用方决定选中行为（@ 插入路径）。 */
   const [picker, setPicker] = useState<{
@@ -81,13 +84,20 @@ export default function App() {
         else if (menu) setMenu(null);
         else if (st.folderPick) store.closeFolderPick();
         else if (st.newTaskOpen) store.closeNewTask();
-        else if (editingId) setEditingId(null);
-        else if (st.findOpen) store.closeFind();
+        else if (editingId) {
+          setEditingId(null);
+          setEditingWhere(null);
+        } else if (st.findOpen) store.closeFind();
         else if (st.preview) store.closePreview();
         return;
       }
       if (!mod) return;
       const k = e.key.toLowerCase();
+      // 设置页打开时它独占键盘；快捷键面板只保留 Ctrl+/ 用于收起，命令面板
+      // 只保留 Ctrl+K。否则 Ctrl+F 会把焦点抢进被遮住的查找条。
+      if (showSettings) return;
+      if (showShortcuts && k !== "/") return;
+      if (st.paletteOpen && k !== "k") return;
       if (k === "k") {
         e.preventDefault();
         if (st.paletteOpen) store.closePalette();
@@ -118,7 +128,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [picker, showSettings, showShortcuts, menu, editingId, st.preview, st.newTaskOpen, st.folderPick, st.paletteOpen, st.findOpen, showSidebar]);
+  }, [picker, showSettings, showShortcuts, menu, editingId, editingWhere, st.preview, st.newTaskOpen, st.folderPick, st.paletteOpen, st.findOpen, showSidebar]);
 
   // 点击空白处收起浮层（锚点元素自身除外，否则刚点开就会被立刻关掉）。
   useEffect(() => {
@@ -146,14 +156,23 @@ export default function App() {
       <div className="work">
         <Sidebar
           hidden={!showSidebar}
-          editingId={editingId}
-          onEdit={setEditingId}
+          editingId={editingWhere === "sidebar" ? editingId : null}
+          onEdit={(id) => {
+            setEditingId(id);
+            setEditingWhere(id ? "sidebar" : null);
+          }}
           onOpenMenu={(id, rect) => setMenu({ id, rect })}
           onOpenSettings={() => setShowSettings(true)}
         />
 
         <section className="main">
-          <TaskBar editingId={editingId} onEdit={setEditingId} />
+          <TaskBar
+            editingId={editingWhere === "bar" ? editingId : null}
+            onEdit={(id) => {
+              setEditingId(id);
+              setEditingWhere(id ? "bar" : null);
+            }}
+          />
           <Transcript />
           <Composer
             onOpenPicker={(rect, onPick) => setPicker({ rect, onPick })}
@@ -180,6 +199,8 @@ export default function App() {
           onRename={(id) => {
             if (st.search) store.setSearch("");
             setEditingId(id);
+            // 菜单锚点在侧栏，但输入框放在顶栏更稳（侧栏可能已收起）。
+            setEditingWhere("bar");
             if (id !== st.activeId) void store.activate(id);
           }}
         />

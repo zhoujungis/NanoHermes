@@ -462,10 +462,12 @@ describe("流式实时文本的独立通道", () => {
   /** 起一轮挂起的发送：run_task 先不返回，增量由测试通过事件通道喂进去。 */
   async function startStream() {
     let resolveRun: (v: string) => void = () => {};
+    let rejectRun: (e: unknown) => void = () => {};
     invokeMock.mockImplementation((cmd: unknown) =>
       cmd === "run_task"
-        ? new Promise<string>((res) => {
+        ? new Promise<string>((res, rej) => {
             resolveRun = res;
+            rejectRun = rej;
           })
         : Promise.resolve(undefined),
     );
@@ -486,6 +488,7 @@ describe("流式实时文本的独立通道", () => {
       cbs,
       delta: (t: string) => cbs[DELTA](t),
       finish: (v = "") => resolveRun(v),
+      fail: (m: string) => rejectRun(new Error(m)),
       done,
     };
   }
@@ -590,6 +593,25 @@ describe("流式实时文本的独立通道", () => {
     expect(s.getState().toast).toBe("任务已停止");
   });
 
+  it("停止后连接断开按停止处理，不冒红色错误气泡", async () => {
+    const { s, delta, fail, done } = await startStream();
+    delta("已经写了一半");
+    await tick();
+
+    await s.stop();
+    // 后端察觉停止后主动断开，客户端看到的是读取失败；这不是故障。
+    fail("读取云端流失败：connection closed");
+    await done;
+
+    const msgs = s.getState().tasks.find((t) => t.id === s.getState().activeId)!.msgs;
+    expect(msgs.some((m) => m.err)).toBe(false);
+    expect(msgs.some((m) => m.k === "note" && (m.t || "").includes("运行中断"))).toBe(false);
+    expect(msgs.some((m) => m.k === "ai" && m.t === "已经写了一半")).toBe(true);
+    expect(s.getState().busy).toBe(false);
+    expect(s.getState().stopping).toBe(false);
+    expect(s.getState().toast).toBe("任务已停止");
+  });
+
   it("运行中继续发送会入队，本轮正常结束后按顺序自动续发", async () => {
     const { s, finish, done } = await startStream();
 
@@ -642,5 +664,60 @@ describe("流式实时文本的独立通道", () => {
     expect(
       s.getState().tasks.find((t) => t.id === s.getState().activeId)!.msgs[last].fold,
     ).toBeUndefined();
+  });
+});
+
+describe("持久化", () => {
+  const LS_KEY = "nanohermes.state.v1";
+
+  it("流式中途落盘会把实时文本写进去，而不是留下一个转圈的空气泡", async () => {
+    const s = await freshStore();
+    const h = s.devBench();
+    h.delta("已经生成的内容");
+
+    // 关闭窗口会同步触发 beforeunload → save()，此时增量还没写回状态。
+    window.dispatchEvent(new Event("beforeunload"));
+
+    const saved = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
+    const msgs = saved.tasks[0].msgs as Array<Record<string, unknown>>;
+    const ai = msgs.find((m) => m.k === "ai")!;
+    expect(ai.t).toBe("已经生成的内容");
+    expect(ai.streaming).toBe(false);
+    h.end();
+  });
+
+  it("加载旧状态时清掉 streaming 标记和空气泡", async () => {
+    localStorage.setItem(
+      LS_KEY,
+      JSON.stringify({
+        activeId: "t1",
+        tasks: [
+          {
+            id: "t1",
+            title: "旧任务",
+            createdAt: 1,
+            updatedAt: 1,
+            msgs: [
+              { k: "user", t: "你好", ts: 1 },
+              { k: "ai", t: "", ts: 2, streaming: true },
+              { k: "ai", t: "完整回答", ts: 3, streaming: true },
+            ],
+            files: [],
+            location: "local",
+            workspace: "",
+            model: "",
+            persona: "",
+          },
+        ],
+      }),
+    );
+
+    const s = await freshStore();
+    await s.boot();
+
+    const msgs = s.getState().tasks.find((t) => t.id === "t1")!.msgs;
+    expect(msgs.some((m) => m.streaming)).toBe(false);
+    expect(msgs.some((m) => m.k === "ai" && !m.t)).toBe(false);
+    expect(msgs.some((m) => m.t === "完整回答")).toBe(true);
   });
 });

@@ -3,6 +3,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent::ui::{UiEvent, UiSink};
@@ -284,7 +285,8 @@ impl AppSettings {
         }
         // The persona list is new; a file from an older build has none.
         if self.personas.is_empty() {
-            self.personas.push(Persona::new(DEFAULT_PERSONA_ID, "默认", ""));
+            self.personas
+                .push(Persona::new(DEFAULT_PERSONA_ID, "默认", ""));
         }
         if !self.personas.iter().any(|p| p.id == self.active_persona) {
             self.active_persona = self.personas[0].id.clone();
@@ -327,7 +329,11 @@ impl AppSettings {
                 pick(&p.api_key, &self.api_key),
                 pick(&p.model, &self.model),
             ),
-            None => (self.base_url.clone(), self.api_key.clone(), self.model.clone()),
+            None => (
+                self.base_url.clone(),
+                self.api_key.clone(),
+                self.model.clone(),
+            ),
         }
     }
 }
@@ -349,7 +355,7 @@ impl Ui {
 
     fn push(&self, text: &str) {
         let chunk = {
-            let mut buf = self.buf.lock().unwrap();
+            let mut buf = acquire(&self.buf);
             buf.push_str(text);
             if buf.len() >= DELTA_FLUSH_CHARS || buf.contains('\n') {
                 Some(std::mem::take(&mut *buf))
@@ -365,7 +371,7 @@ impl Ui {
     /// Emit any buffered text right away (before a tool line, or at turn end).
     fn flush(&self) {
         let chunk = {
-            let mut buf = self.buf.lock().unwrap();
+            let mut buf = acquire(&self.buf);
             if buf.is_empty() {
                 None
             } else {
@@ -375,6 +381,13 @@ impl Ui {
         if let Some(chunk) = chunk {
             let _ = self.app.emit(EVENT_DELTA, chunk);
         }
+    }
+
+    /// Drop buffered text without emitting it. Called at the start of a turn so
+    /// a previous turn's unflushed tail cannot appear in this answer (or in a
+    /// different task's transcript after a switch).
+    fn discard(&self) {
+        acquire(&self.buf).clear();
     }
 
     fn tool(&self, name: String, summary: String, output: String) {
@@ -422,6 +435,29 @@ fn make_sink(ui: &Arc<Ui>) -> UiSink {
             completion_tokens,
         } => ui.usage(requests, prompt_tokens, completion_tokens),
     })
+}
+
+/// Lock a state mutex even if a previous holder panicked. Without this, one
+/// panic while holding a state lock poisons it and every later command fails
+/// with a thread-panic error until the app is restarted.
+fn acquire<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Warnings that describe a persistent misconfiguration (a deleted profile, an
+/// unknown mode) are emitted once per app session: `bind_agent` runs on every
+/// task switch, and repeating them would clutter each transcript.
+static REPORTED_WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn warn_once(ui: &Arc<Ui>, key: &str, message: &str) {
+    {
+        let mut seen = acquire(&REPORTED_WARNINGS);
+        if seen.iter().any(|k| k == key) {
+            return;
+        }
+        seen.push(key.to_string());
+    }
+    ui.note(message.to_string());
 }
 
 struct AppState {
@@ -472,24 +508,63 @@ fn session_path(id: &str) -> Result<PathBuf, String> {
     {
         return Err(format!("非法的任务标识：{id}"));
     }
+    // Windows resolves CON/NUL/COM1 even with an extension, so
+    // `sessions/nul.json` would silently write to the device.
+    let upper = id.to_ascii_uppercase();
+    let device = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.as_bytes()[3].is_ascii_digit());
+    if device {
+        return Err(format!("非法的任务标识：{id}"));
+    }
     let dir = data_dir().join("sessions");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join(format!("{id}.json")))
 }
 
 fn load_settings() -> AppSettings {
-    if let Ok(data) = std::fs::read_to_string(settings_path()) {
-        if let Ok(mut s) = serde_json::from_str::<AppSettings>(&data) {
-            s.migrate();
-            return s;
+    let path = settings_path();
+    match std::fs::read_to_string(&path) {
+        Ok(data) => match serde_json::from_str::<AppSettings>(&data) {
+            Ok(mut s) => {
+                s.migrate();
+                return s;
+            }
+            Err(e) => {
+                // Keep the damaged file for recovery instead of silently
+                // replacing every profile/persona with defaults on next save.
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let backup = path.with_extension(format!("json.corrupt-{stamp}"));
+                eprintln!(
+                    "warning: settings {} are corrupt ({e}); kept a copy at {}",
+                    path.display(),
+                    backup.display()
+                );
+                let _ = std::fs::rename(&path, backup);
+            }
+        },
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!("warning: could not read settings {}: {e}", path.display());
         }
+        Err(_) => {}
     }
     AppSettings::default()
 }
 
 fn save_settings(s: &AppSettings) -> Result<(), String> {
     let data = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
-    std::fs::write(settings_path(), data).map_err(|e| e.to_string())
+    let path = settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    // write-temp + rename: a crash mid-write must not truncate the settings.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
 /// Build an agent wired to the UI sink and (optionally) to a task session file.
@@ -504,6 +579,43 @@ fn build_agent(
     model: Option<&str>,
     persona: Option<&str>,
 ) -> Result<Agent, String> {
+    // A task keeps its chosen profile id even after that profile is deleted;
+    // falling back silently would send the prompt (and images) to a different
+    // provider. Tell the user instead.
+    if let Some(want) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        if !s.models.iter().any(|p| p.id == want) {
+            warn_once(
+                ui,
+                &format!("model:{want}"),
+                "任务使用的模型档案已删除，已改用默认档案",
+            );
+        }
+    }
+    if let Some(want) = persona.map(str::trim).filter(|p| !p.is_empty()) {
+        if !s.personas.iter().any(|p| p.id == want) {
+            warn_once(
+                ui,
+                &format!("persona:{want}"),
+                "任务使用的人设已删除，已改用默认人设",
+            );
+        }
+    }
+    // An unknown mode must never silently fall back to Default (which blocks
+    // nothing): Plan is the read-only option, and the note explains the change.
+    let permission_mode = match PermissionMode::parse(&s.mode) {
+        Ok(m) => m,
+        Err(_) => {
+            warn_once(
+                ui,
+                &format!("mode:{}", s.mode),
+                &format!(
+                    "设置里的权限模式 `{}` 无法识别，已回退为只读的 Plan 模式",
+                    s.mode
+                ),
+            );
+            PermissionMode::Plan
+        }
+    };
     let (base_url, api_key, model_name) = s.resolved(model);
     if api_key.trim().is_empty() {
         return Err("尚未设置 API Key，请在「设置 → 模型」中填写后再试".to_string());
@@ -521,7 +633,7 @@ fn build_agent(
         output_format: OutputFormat::Text,
         auto_approve: true,
         session: session_file,
-        permission_mode: PermissionMode::parse(&s.mode).unwrap_or(PermissionMode::Default),
+        permission_mode,
         // Advanced tuning, applied to local turns only (a cloud turn's behaviour
         // is decided by the remote daemon).
         thinking: s.thinking,
@@ -549,7 +661,7 @@ fn bind_agent(
     model: Option<&str>,
     persona: Option<&str>,
 ) {
-    let settings = state.settings.lock().unwrap().clone();
+    let settings = acquire(&state.settings).clone();
     // A task carries its own folder; the settings workspace is only the default
     // used when a task did not choose one.
     let ws = match workspace {
@@ -558,16 +670,16 @@ fn bind_agent(
     };
     let ui = Arc::clone(&state.ui);
     let built = build_agent(&settings, &ui, session, &ws, model, persona);
-    *state.agent.lock().unwrap() = built.ok();
-    *state.session.lock().unwrap() = session.map(|s| s.to_string());
-    *state.workspace.lock().unwrap() = if ws.trim().is_empty() { None } else { Some(ws) };
+    *acquire(&state.agent) = built.ok();
+    *acquire(&state.session) = session.map(|s| s.to_string());
+    *acquire(&state.workspace) = if ws.trim().is_empty() { None } else { Some(ws) };
     // An empty choice means "follow the default profile", so only a real id is
     // remembered.
-    *state.model.lock().unwrap() = model
+    *acquire(&state.model) = model
         .map(str::trim)
         .filter(|m| !m.is_empty())
         .map(str::to_string);
-    *state.persona.lock().unwrap() = persona
+    *acquire(&state.persona) = persona
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .map(str::to_string);
@@ -575,75 +687,73 @@ fn bind_agent(
 
 /// Workspace of the task the UI is currently showing.
 fn active_workspace(state: &AppState) -> String {
-    if let Some(ws) = state.workspace.lock().unwrap().clone() {
+    if let Some(ws) = acquire(&state.workspace).clone() {
         if !ws.trim().is_empty() {
             return ws;
         }
     }
-    state.settings.lock().unwrap().workspace.clone()
+    acquire(&state.settings).workspace.clone()
 }
 
 /// The workspace override currently in force, for callers that need to rebuild
 /// the agent without changing it.
 fn keep_workspace(state: &AppState) -> Option<String> {
-    state.workspace.lock().unwrap().clone()
+    acquire(&state.workspace).clone()
 }
 
 /// The model profile the live agent was built with, for callers that need to
 /// rebuild the agent without changing it.
 fn keep_model(state: &AppState) -> Option<String> {
-    state.model.lock().unwrap().clone()
+    acquire(&state.model).clone()
 }
 
 /// The persona the live agent was built with, for callers that need to rebuild
 /// the agent without changing it.
 fn keep_persona(state: &AppState) -> Option<String> {
-    state.persona.lock().unwrap().clone()
+    acquire(&state.persona).clone()
 }
 
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> AppSettings {
-    state.settings.lock().unwrap().clone()
+    acquire(&state.settings).clone()
 }
 
 /// 设置写盘串行化：命令改成异步后会并发进入阻塞线程池，两次写入若乱序完成，
 /// 旧值就会覆盖新值（自动保存是去抖的，但慢盘上仍可能重叠）。
 static SETTINGS_WRITE: Mutex<()> = Mutex::new(());
 
+/// 在进入阻塞线程池之前记录到达顺序，真正写盘时丢弃比已应用版本更旧的快照。
+/// 只用互斥量只能串行执行，不能阻止两个任务以相反顺序拿到锁。
+static SETTINGS_ARRIVED: AtomicU64 = AtomicU64::new(0);
+static SETTINGS_APPLIED: AtomicU64 = AtomicU64::new(0);
+
+fn next_settings_seq() -> u64 {
+    SETTINGS_ARRIVED.fetch_add(1, Ordering::SeqCst) + 1
+}
+
 /// 设置每次修改都会落盘，写盘 + 重建 agent 都不该占着主线程：写文件在慢盘上、
 /// 尤其是网络盘上可能要几百毫秒，card 一按就整窗顿一下。
 #[tauri::command]
-async fn save_settings_cmd(
-    app: AppHandle,
-    settings: AppSettings,
-) -> Result<(), String> {
+async fn save_settings_cmd(app: AppHandle, settings: AppSettings) -> Result<(), String> {
+    // Capture arrival order before hopping to the blocking pool; otherwise two
+    // overlapping autosaves can acquire the mutex in reverse and let the older
+    // snapshot win both on disk and in memory.
+    let seq = next_settings_seq();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let _writing = SETTINGS_WRITE.lock().unwrap();
+        let _writing = SETTINGS_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        if seq < SETTINGS_APPLIED.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let state = app.state::<AppState>();
         save_settings(&settings)?;
-        *state.settings.lock().unwrap() = settings;
-        // Rebuild with the same session so a settings change keeps the history that
-        // is already persisted on disk for the current task. A local turn holds the
-        // agent mutex for its whole duration, so rebuilding while it runs would stall
-        // this command — and the settings page's "保存中…" — until that turn ends.
-        // When the lock is busy the change is already on disk, so we only leave a
-        // marker and the next turn picks the new settings up.
-        let agent_free = state.agent.try_lock().is_ok();
-        if agent_free {
-            let session = state.session.lock().unwrap().clone();
-            let ws = keep_workspace(&state);
-            let model = keep_model(&state);
-            let persona = keep_persona(&state);
-            bind_agent(
-                &state,
-                session.as_deref(),
-                ws.as_deref(),
-                model.as_deref(),
-                persona.as_deref(),
-            );
-        } else {
-            *state.rebind.lock().unwrap() = true;
-        }
+        *acquire(&state.settings) = settings;
+        // Never rebuild here. `try_lock` cannot reserve the agent, so a turn can
+        // start right after the probe and make `bind_agent` block for its whole
+        // duration — the "保存中…" freeze this command exists to avoid. It would
+        // also read the session file while a turn may be writing it. Mark the
+        // agent stale instead; `run_task_inner` rebuilds at the next turn start.
+        *acquire(&state.rebind) = true;
+        SETTINGS_APPLIED.store(seq, Ordering::SeqCst);
         Ok(())
     })
     .await
@@ -672,9 +782,17 @@ async fn new_task(
         }
         let ws = match workspace {
             Some(w) => w,
-            None => keep_workspace(&state).unwrap_or_default(),
+            // A task without its own folder follows the configured default, not
+            // whatever folder the previously active task happened to use.
+            None => acquire(&state.settings).workspace.clone(),
         };
-        bind_agent(&state, Some(&id), Some(&ws), model.as_deref(), persona.as_deref());
+        bind_agent(
+            &state,
+            Some(&id),
+            Some(&ws),
+            model.as_deref(),
+            persona.as_deref(),
+        );
         Ok(())
     })
     .await
@@ -696,9 +814,15 @@ async fn open_task(
         session_path(&id)?;
         let ws = match workspace {
             Some(w) => w,
-            None => active_workspace(&state),
+            None => acquire(&state.settings).workspace.clone(),
         };
-        bind_agent(&state, Some(&id), Some(&ws), model.as_deref(), persona.as_deref());
+        bind_agent(
+            &state,
+            Some(&id),
+            Some(&ws),
+            model.as_deref(),
+            persona.as_deref(),
+        );
         Ok(())
     })
     .await
@@ -710,9 +834,9 @@ async fn open_task(
 async fn reset_task(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let state = app.state::<AppState>();
-        let session = state.session.lock().unwrap().clone();
+        let session = acquire(&state.session).clone();
         let live = {
-            let mut guard = state.agent.lock().unwrap();
+            let mut guard = acquire(&state.agent);
             match guard.as_mut() {
                 Some(agent) => {
                     agent.reset();
@@ -722,6 +846,15 @@ async fn reset_task(app: AppHandle) -> Result<(), String> {
             }
         };
         if !live {
+            // The agent failed to build (typically a missing API key), so there is
+            // no live history to reset — but the session file on disk still holds
+            // the old conversation and would come back once the key is fixed.
+            if let Some(id) = session.as_deref() {
+                let path = session_path(id)?;
+                if path.exists() {
+                    std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+                }
+            }
             let ws = keep_workspace(&state);
             let model = keep_model(&state);
             let persona = keep_persona(&state);
@@ -747,7 +880,7 @@ async fn delete_task(app: AppHandle, id: String) -> Result<(), String> {
         if path.exists() {
             std::fs::remove_file(&path).map_err(|e| e.to_string())?;
         }
-        if state.session.lock().unwrap().as_deref() == Some(id.as_str()) {
+        if acquire(&state.session).as_deref() == Some(id.as_str()) {
             bind_agent(&state, None, None, None, None);
         }
         Ok(())
@@ -762,14 +895,15 @@ async fn set_mode(app: AppHandle, mode: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let state = app.state::<AppState>();
         let parsed = PermissionMode::parse(&mode)?;
-        let mut guard = state.agent.lock().unwrap();
-        if let Some(agent) = guard.as_mut() {
+        if let Some(agent) = acquire(&state.agent).as_mut() {
             agent.set_permission_mode(parsed);
         }
-        drop(guard);
-        state.settings.lock().unwrap().mode = mode;
-        let settings = state.settings.lock().unwrap().clone();
-        save_settings(&settings)
+        // Update memory only. Persisting here would write a whole settings
+        // snapshot that may predate a queued autosave (dropping a concurrent
+        // API-key edit); the frontend persists the mode through the single
+        // ordered `save_settings_cmd` path instead.
+        acquire(&state.settings).mode = mode;
+        Ok(())
     })
     .await
     .map_err(|e| format!("任务线程异常：{e}"))?
@@ -817,7 +951,9 @@ fn walk_files(root: &std::path::Path, rel: &str, depth: usize, out: &mut Vec<Str
         if name.starts_with('.') {
             continue;
         }
-        let Ok(kind) = entry.file_type() else { continue };
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
         let child = if rel.is_empty() {
             name.clone()
         } else {
@@ -877,7 +1013,10 @@ async fn read_file_preview(app: AppHandle, path: String) -> Result<String, Strin
             return Err("这不是一个文件".to_string());
         }
         if meta.len() > MAX_BYTES {
-            return Err(format!("文件过大（{} KB），暂不支持预览", meta.len() / 1024));
+            return Err(format!(
+                "文件过大（{} KB），暂不支持预览",
+                meta.len() / 1024
+            ));
         }
         let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
         Ok(String::from_utf8_lossy(&bytes).to_string())
@@ -903,10 +1042,24 @@ async fn file_diff(app: AppHandle, path: String) -> Result<FileDiff, String> {
         const MAX_DIFF_BYTES: usize = 200 * 1024;
         let state = app.state::<AppState>();
         let ws = active_workspace(&state);
-        let root = PathBuf::from(&ws);
+        let root = std::fs::canonicalize(&ws).map_err(|e| format!("工作区不可用：{e}"))?;
         if !root.is_dir() {
             return Err("工作区不可用，请先在设置里选择工作区".to_string());
         }
+        // The touched path comes from a tool argument summary, so it may be
+        // absolute, relative or even truncated. Resolve and confine it the same
+        // way as the preview, then hand git a path *inside* the repository.
+        let requested = PathBuf::from(&path);
+        let candidate = if requested.is_absolute() {
+            requested
+        } else {
+            root.join(requested)
+        };
+        let full = std::fs::canonicalize(&candidate).map_err(|e| format!("无法打开文件：{e}"))?;
+        if !full.starts_with(&root) {
+            return Err("该文件不在当前工作区内".to_string());
+        }
+        let rel = full.strip_prefix(&root).unwrap_or(&full);
 
         let probe = std::process::Command::new("git")
             .arg("-C")
@@ -916,20 +1069,43 @@ async fn file_diff(app: AppHandle, path: String) -> Result<FileDiff, String> {
         match probe {
             Ok(out) if out.status.success() => {
                 if String::from_utf8_lossy(&out.stdout).trim() != "true" {
-                    return Ok(FileDiff { repo: false, text: String::new() });
+                    return Ok(FileDiff {
+                        repo: false,
+                        text: String::new(),
+                    });
                 }
             }
-            Ok(_) => return Ok(FileDiff { repo: false, text: String::new() }),
+            Ok(_) => {
+                return Ok(FileDiff {
+                    repo: false,
+                    text: String::new(),
+                })
+            }
             Err(e) => return Err(format!("无法执行 git：{e}")),
         }
 
         // `HEAD` compares the working tree and the index against the last commit,
         // so both staged and unstaged edits of the agent show up.
+        // The workspace is repo-controlled: `diff.external`, textconv drivers and
+        // core.fsmonitor can all execute commands. Neutralise them so clicking a
+        // file cannot run code outside the agent's permission mode and transcript.
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(&root)
-            .args(["diff", "--no-color", "HEAD", "--"])
-            .arg(&path)
+            .args([
+                "-c",
+                "diff.external=",
+                "-c",
+                "core.fsmonitor=false",
+                "--no-pager",
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "HEAD",
+                "--",
+            ])
+            .arg(rel)
             .output()
             .map_err(|e| format!("无法执行 git：{e}"))?;
         if !out.status.success() {
@@ -967,14 +1143,32 @@ fn safe_stem(raw: &str) -> String {
     const BAD: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
     let cleaned: String = raw
         .chars()
-        .map(|c| if c.is_control() || BAD.contains(&c) { '-' } else { c })
+        .map(|c| {
+            if c.is_control() || BAD.contains(&c) {
+                '-'
+            } else {
+                c
+            }
+        })
         .collect();
     // Windows strips trailing dots, and a name of only dots is not usable.
     let trimmed = cleaned.trim().trim_matches('.');
     if trimmed.is_empty() {
         return "conversation".to_string();
     }
-    trimmed.chars().take(60).collect()
+    let stem: String = trimmed.chars().take(60).collect();
+    // Windows treats CON/NUL/COM1… as devices even when they carry an extension,
+    // so `CON.md` would write to the console instead of a file.
+    let upper = stem.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let device = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.as_bytes()[3].is_ascii_digit());
+    if device {
+        format!("_{stem}")
+    } else {
+        stem
+    }
 }
 
 /// 导出的 Markdown 可能是整段长对话，写盘交给阻塞线程池。
@@ -990,14 +1184,35 @@ fn export_task_inner(name: String, text: String) -> Result<String, String> {
     let dir = data_dir().join("exports");
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建导出目录：{e}"))?;
     let stem = safe_stem(&name);
-    let mut path = dir.join(format!("{stem}.md"));
-    let mut n = 1;
-    while path.exists() {
-        n += 1;
-        path = dir.join(format!("{stem}-{n}.md"));
+    // `create_new` closes the check-then-write race: two overlapping exports of
+    // the same title must get distinct files instead of one truncating the other.
+    use std::io::Write as _;
+    let mut n = 0u32;
+    loop {
+        let path = if n == 0 {
+            dir.join(format!("{stem}.md"))
+        } else {
+            dir.join(format!("{stem}-{}.md", n + 1))
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(text.as_bytes())
+                    .map_err(|e| format!("写入失败：{e}"))?;
+                return Ok(path.to_string_lossy().to_string());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                n += 1;
+                if n > 10_000 {
+                    return Err("导出文件名冲突过多".to_string());
+                }
+            }
+            Err(e) => return Err(format!("写入失败：{e}")),
+        }
     }
-    std::fs::write(&path, text).map_err(|e| format!("写入失败：{e}"))?;
-    Ok(path.to_string_lossy().to_string())
 }
 
 /* -------------------------------------------------------------- 目录浏览 */
@@ -1122,8 +1337,9 @@ fn model_err(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, _) => match code {
             401 | 403 => "API Key 不正确或没有访问权限".to_string(),
-            404 => "Base URL 不正确：找不到 /models（有些服务需要带上 /v1 之类的版本路径）"
-                .to_string(),
+            404 => {
+                "Base URL 不正确：找不到 /models（有些服务需要带上 /v1 之类的版本路径）".to_string()
+            }
             _ => format!("模型服务返回错误状态 {code}"),
         },
         ureq::Error::Transport(t) => format!("无法连接模型服务：{t}"),
@@ -1221,9 +1437,13 @@ fn cloud_run(
     ui: &Arc<Ui>,
 ) -> Result<String, String> {
     let base = normalize_base_url(&s.cloud_url)?;
-    // A remote turn can take minutes (the daemon runs the whole tool loop).
+    // A remote turn can take minutes (the daemon runs the whole tool loop), so
+    // cap *idle* time rather than the whole call: a healthy stream keeps
+    // resetting the read timeout, while a wedged daemon fails within minutes
+    // instead of leaving the task in "执行中" until a 15-minute cap fires.
     let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(900))
+        .timeout_connect(std::time::Duration::from_secs(15))
+        .timeout_read(std::time::Duration::from_secs(300))
         .build();
     let mut req = agent
         .post(&base)
@@ -1261,7 +1481,11 @@ fn cloud_run(
     // omits it, in which case nothing is sent and the counter stays hidden.
     if let Some(u) = body.get("usage") {
         let field = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-        ui.usage(field("requests"), field("prompt_tokens"), field("completion_tokens"));
+        ui.usage(
+            field("requests"),
+            field("prompt_tokens"),
+            field("completion_tokens"),
+        );
     }
     Ok(body
         .get("response")
@@ -1283,14 +1507,26 @@ struct StreamOutcome {
     /// The daemon reported a failure; the message is shown to the user instead of
     /// an empty answer.
     error: Option<String>,
+    /// The user pressed Stop; the partial stream is a normal ending, not a fault.
+    cancelled: bool,
 }
 
 /// Parse one daemon event stream, handing every event to `on` as it is read.
 /// Kept separate from the Tauri plumbing so the framing and the failure rules can
 /// be tested without an app handle.
-fn read_ndjson<R: BufRead>(reader: R, mut on: impl FnMut(&serde_json::Value)) -> Result<StreamOutcome, String> {
+fn read_ndjson<R: BufRead>(
+    reader: R,
+    mut on: impl FnMut(&serde_json::Value),
+    mut stopped: impl FnMut() -> bool,
+) -> Result<StreamOutcome, String> {
     let mut out = StreamOutcome::default();
     for line in reader.lines() {
+        // The stop flag is checked at event boundaries — the same rule as a local
+        // turn — so a cloud turn stops as soon as the daemon sends its next event.
+        if stopped() {
+            out.cancelled = true;
+            break;
+        }
         let line = line.map_err(|e| format!("读取云端流失败：{e}"))?;
         let line = line.trim();
         if line.is_empty() {
@@ -1331,20 +1567,29 @@ fn read_ndjson<R: BufRead>(reader: R, mut on: impl FnMut(&serde_json::Value)) ->
 /// reply text. An `error` event, or a stream that ends before its `done` line, is
 /// reported as a failure rather than passed off as an empty answer.
 fn cloud_read_stream(resp: ureq::Response, ui: &Arc<Ui>) -> Result<String, String> {
-    let outcome = read_ndjson(BufReader::new(resp.into_reader()), |ev| {
-        let text = |k: &str| ev.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        match ev.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-            "delta" => ui.push(&text("text")),
-            "tool" => ui.tool(text("name"), text("summary"), text("output")),
-            "note" => ui.note(text("text")),
-            "usage" => {
-                let n = |k: &str| ev.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                ui.usage(n("requests"), n("prompt_tokens"), n("completion_tokens"));
+    let outcome = read_ndjson(
+        BufReader::new(resp.into_reader()),
+        |ev| {
+            let text = |k: &str| ev.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            match ev.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                "delta" => ui.push(&text("text")),
+                "tool" => ui.tool(text("name"), text("summary"), text("output")),
+                "note" => ui.note(text("text")),
+                "usage" => {
+                    let n = |k: &str| ev.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                    ui.usage(n("requests"), n("prompt_tokens"), n("completion_tokens"));
+                }
+                _ => {}
             }
-            _ => {}
-        }
-    })?;
+        },
+        agent::interrupt::take,
+    )?;
     ui.flush();
+    // A user-requested stop ends the turn on purpose: keep whatever was streamed
+    // and let the UI report "task stopped" instead of a stream error.
+    if outcome.cancelled {
+        return Ok(outcome.text);
+    }
     if let Some(err) = outcome.error {
         return Err(format!("云端执行失败：{err}"));
     }
@@ -1389,25 +1634,35 @@ fn run_task_inner(
     images: Option<Vec<String>>,
 ) -> Result<String, String> {
     let images = images.unwrap_or_default();
-    let session = state.session.lock().unwrap().clone();
+    // A stop flag left over from an earlier turn must not cancel this prompt at
+    // iteration zero (the cloud reader checks it before the first event).
+    agent::interrupt::take();
+    // Drop any unflushed tail from a previous turn before writing this one.
+    state.ui.discard();
+    let session = acquire(&state.session).clone();
     {
         // Cloud turns never touch the local agent: the daemon owns the model key,
         // the workspace and the permission mode.
-        let settings = state.settings.lock().unwrap().clone();
+        let settings = acquire(&state.settings).clone();
         let cloud = match location.as_deref() {
             Some(loc) => is_cloud(loc),
             None => is_cloud(&settings.location),
         };
         if cloud {
-            return cloud_run(&settings, session.as_deref(), &prompt, &images, &state.ui);
+            // Flush even when the stream fails: the tail is part of this turn's
+            // answer, and leaving it in the shared buffer leaks it into the next
+            // answer.
+            let result = cloud_run(&settings, session.as_deref(), &prompt, &images, &state.ui);
+            state.ui.flush();
+            return result;
         }
     }
     {
         // A settings change that arrived while an earlier turn was running was
         // written to disk without rebuilding the agent; apply it now, while no
         // turn holds the lock, so this turn already uses the new settings.
-        if std::mem::take(&mut *state.rebind.lock().unwrap()) {
-            let session = state.session.lock().unwrap().clone();
+        if std::mem::take(&mut *acquire(&state.rebind)) {
+            let session = acquire(&state.session).clone();
             let ws = keep_workspace(state);
             let model = keep_model(state);
             let persona = keep_persona(state);
@@ -1419,9 +1674,9 @@ fn run_task_inner(
                 persona.as_deref(),
             );
         }
-        let mut guard = state.agent.lock().unwrap();
+        let mut guard = acquire(&state.agent);
         if guard.is_none() {
-            let settings = state.settings.lock().unwrap().clone();
+            let settings = acquire(&state.settings).clone();
             let ws = active_workspace(state);
             let model = keep_model(state);
             let persona = keep_persona(state);
@@ -1436,7 +1691,7 @@ fn run_task_inner(
         }
     }
 
-    let mut guard = state.agent.lock().unwrap();
+    let mut guard = acquire(&state.agent);
     let agent = guard.as_mut().ok_or("agent not initialised")?;
     let result = agent.run(user_content(&prompt, &images));
     drop(guard);
@@ -1461,14 +1716,18 @@ mod tests {
             "{\"type\":\"done\",\"response\":\"你好\",\"session\":\"t1\"}\n",
         );
         let mut kinds: Vec<String> = Vec::new();
-        let out = read_ndjson(stream.as_bytes(), |ev| {
-            kinds.push(
-                ev.get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("?")
-                    .to_string(),
-            );
-        })
+        let out = read_ndjson(
+            stream.as_bytes(),
+            |ev| {
+                kinds.push(
+                    ev.get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("?")
+                        .to_string(),
+                );
+            },
+            || false,
+        )
         .unwrap();
         assert!(out.done, "收到 done 行就该算这一轮完成");
         assert_eq!(out.text, "你好");
@@ -1482,15 +1741,34 @@ mod tests {
 
     #[test]
     fn read_ndjson_flags_failure_and_truncation() {
-        let failed = read_ndjson("{\"type\":\"error\",\"error\":\"模型超时\"}\n".as_bytes(), |_| {})
-            .unwrap();
+        let failed = read_ndjson(
+            "{\"type\":\"error\",\"error\":\"模型超时\"}\n".as_bytes(),
+            |_| {},
+            || false,
+        )
+        .unwrap();
         assert_eq!(failed.error.as_deref(), Some("模型超时"));
         assert!(!failed.done, "报错的流不能被当成正常完成");
 
         // 连接断在半路：没有 done 行，必须能被识别出来，否则会显示成空回答。
-        let cut = read_ndjson("{\"type\":\"delta\",\"text\":\"半\"}\n".as_bytes(), |_| {}).unwrap();
+        let cut = read_ndjson(
+            "{\"type\":\"delta\",\"text\":\"半\"}\n".as_bytes(),
+            |_| {},
+            || false,
+        )
+        .unwrap();
         assert!(!cut.done);
         assert!(cut.error.is_none());
+
+        // 用户点了停止：即使没有 done 行，也属于正常结束，不能报成断流。
+        let stopped = read_ndjson(
+            "{\"type\":\"delta\",\"text\":\"半\"}\n".as_bytes(),
+            |_| {},
+            || true,
+        )
+        .unwrap();
+        assert!(stopped.cancelled);
+        assert!(!stopped.done);
     }
 
     fn scratch(tag: &str) -> PathBuf {
@@ -1563,8 +1841,14 @@ mod tests {
 
     #[test]
     fn safe_stem_is_a_plain_file_name() {
-        assert!(!safe_stem("../../etc/passwd").contains('/'), "不能保留路径分隔符");
-        assert!(!safe_stem("C:\\Windows\\x").contains('\\'), "不能保留路径分隔符");
+        assert!(
+            !safe_stem("../../etc/passwd").contains('/'),
+            "不能保留路径分隔符"
+        );
+        assert!(
+            !safe_stem("C:\\Windows\\x").contains('\\'),
+            "不能保留路径分隔符"
+        );
         let reserved = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
         let cleaned = safe_stem("a:b*c?d\"e<f>g|h");
         assert!(
@@ -1573,8 +1857,16 @@ mod tests {
         );
         assert_eq!(safe_stem("   "), "conversation", "空标题要有兜底名字");
         assert_eq!(safe_stem(".."), "conversation");
-        assert!(safe_stem(&"长".repeat(200)).chars().count() <= 60, "名字不能过长");
+        assert!(
+            safe_stem(&"长".repeat(200)).chars().count() <= 60,
+            "名字不能过长"
+        );
         assert_eq!(safe_stem("  修复登录   "), "修复登录");
+        // Windows 设备名即使带扩展名也不可用（`CON.md` 仍是控制台）。
+        assert_eq!(safe_stem("CON"), "_CON");
+        assert_eq!(safe_stem("com1"), "_com1");
+        assert_eq!(safe_stem("nul.txt"), "_nul.txt");
+        assert_eq!(safe_stem("console"), "console");
     }
 
     #[test]
@@ -1602,7 +1894,9 @@ mod tests {
 
     #[test]
     fn session_path_rejects_ids_that_escape_the_sessions_dir() {
-        for bad in ["", "../evil", "a/b", "a\\b", "a:b", "a b", "a.json"] {
+        for bad in [
+            "", "../evil", "a/b", "a\\b", "a:b", "a b", "a.json", "CON", "nul", "com1", "LPT9",
+        ] {
             assert!(session_path(bad).is_err(), "应当拒绝：{bad:?}");
         }
         let long = "x".repeat(65);
@@ -1692,7 +1986,10 @@ mod tests {
         assert_eq!(partial.api_key, "only-key");
         assert_eq!(partial.mode, "default");
         assert_eq!(partial.location, "local");
-        assert!(partial.models.is_empty(), "旧文件里没有模型列表，交给 migrate 补");
+        assert!(
+            partial.models.is_empty(),
+            "旧文件里没有模型列表，交给 migrate 补"
+        );
     }
 
     #[test]
@@ -1712,7 +2009,8 @@ mod tests {
 
         // 已经带列表的文件不需要再补，指针也必须落在列表里。
         let mut rich = s.clone();
-        rich.models.push(profile("b", "乙", "https://b/v1", "kb", "mb"));
+        rich.models
+            .push(profile("b", "乙", "https://b/v1", "kb", "mb"));
         rich.active_model = "b".into();
         rich.migrate();
         assert_eq!(rich.models.len(), 2, "已有列表不再补默认项");
@@ -1720,7 +2018,10 @@ mod tests {
 
         rich.active_model = "不存在".into();
         rich.migrate();
-        assert_eq!(rich.active_model, "default", "悬空的默认指针要指回第一个档案");
+        assert_eq!(
+            rich.active_model, "default",
+            "悬空的默认指针要指回第一个档案"
+        );
     }
 
     #[test]
@@ -1740,7 +2041,10 @@ mod tests {
 
         s.active_persona = "不存在".into();
         s.migrate();
-        assert_eq!(s.active_persona, DEFAULT_PERSONA_ID, "悬空的人设指针要指回第一个");
+        assert_eq!(
+            s.active_persona, DEFAULT_PERSONA_ID,
+            "悬空的人设指针要指回第一个"
+        );
     }
 
     #[test]
@@ -1816,7 +2120,11 @@ mod tests {
         s.models.clear();
         assert_eq!(
             s.resolved(None),
-            ("https://legacy/v1".into(), "legacy-key".into(), "legacy-model".into())
+            (
+                "https://legacy/v1".into(),
+                "legacy-key".into(),
+                "legacy-model".into()
+            )
         );
     }
 
@@ -1852,7 +2160,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p1b).unwrap(), "# hi\n");
         let name1 = p1b.file_name().unwrap().to_string_lossy().to_string();
         assert!(name1.ends_with(".md"));
-        assert!(!name1.contains('/') && !name1.contains('\\'), "文件名不能带路径分隔符");
+        assert!(
+            !name1.contains('/') && !name1.contains('\\'),
+            "文件名不能带路径分隔符"
+        );
 
         let p2 = export_task_inner(format!("../{tag}"), "second".to_string()).unwrap();
         let p2b = PathBuf::from(&p2);

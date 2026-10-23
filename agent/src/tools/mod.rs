@@ -403,6 +403,59 @@ pub fn resolve(root: &Path, p: &str) -> PathBuf {
     }
 }
 
+/// Enforce the configured filesystem sandbox for the *file tools*. The shell
+/// sandbox only covers spawned commands, so without this `write_file` could edit
+/// `~/.bashrc` even under `--sandbox read-only`.
+pub fn check_write(ctx: &Ctx, path: &Path) -> Result<(), String> {
+    match ctx.sandbox {
+        crate::config::SandboxMode::ReadOnly => Err(
+            "sandbox is read-only: file writes are disabled (use run_command with --sandbox off to allow them)"
+                .to_string(),
+        ),
+        crate::config::SandboxMode::WorkspaceWrite => {
+            let root = std::fs::canonicalize(&ctx.root)
+                .map_err(|e| format!("workspace unavailable: {e}"))?;
+            let target = canonical_with_missing(path)
+                .ok_or_else(|| format!("cannot resolve {}", path.display()))?;
+            if target.starts_with(&root) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "sandbox is workspace-write: {} is outside the workspace",
+                    path.display()
+                ))
+            }
+        }
+        // Off / danger-full-access: explicitly unrestricted.
+        _ => Ok(()),
+    }
+}
+
+/// Canonicalise a path whose final components may not exist yet (write_file
+/// creates parent directories). Walks up to the nearest existing ancestor and
+/// re-appends the missing tail.
+fn canonical_with_missing(path: &Path) -> Option<PathBuf> {
+    let mut cur = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(base) = std::fs::canonicalize(&cur) {
+            let mut out = base;
+            for part in tail.iter().rev() {
+                out.push(part);
+            }
+            return Some(out);
+        }
+        tail.push(cur.file_name()?.to_os_string());
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
 /// Render the sub-agent job board for the `agent_list` tool.
 fn render_agent_board(ctx: &Ctx) -> String {
     let jobs = ctx.board.list();

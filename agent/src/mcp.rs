@@ -21,6 +21,12 @@ use serde_json::{json, Value};
 
 type RespMap = Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<Value>>>>;
 
+/// Lock without propagating poisoning: a panic in one request thread must not
+/// make every later MCP call fail (or panic) for the rest of the session.
+fn lock_or_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// One connected MCP server.
 pub struct Server {
     name: String,
@@ -254,20 +260,23 @@ impl Server {
             Transport::Stdio(t) => {
                 let id = t.next_id.fetch_add(1, Ordering::Relaxed);
                 let (tx, rx) = std::sync::mpsc::channel();
-                t.responses.lock().unwrap().insert(id, tx);
+                lock_or_recover(&t.responses).insert(id, tx);
 
                 let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
                 if let Err(e) = t.send(&msg) {
-                    t.responses.lock().unwrap().remove(&id);
+                    lock_or_recover(&t.responses).remove(&id);
                     return Err(e);
                 }
 
                 match rx.recv_timeout(Duration::from_secs(60)) {
                     Ok(resp) => unwrap_rpc(resp, method),
-                    Err(_) => {
-                        t.responses.lock().unwrap().remove(&id);
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        lock_or_recover(&t.responses).remove(&id);
                         Err(format!("MCP request `{method}` timed out"))
                     }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(format!(
+                        "MCP server disconnected while waiting for `{method}`"
+                    )),
                 }
             }
             Transport::Http(t) => {
@@ -494,7 +503,7 @@ impl HttpTransport {
         for (k, v) in &self.headers {
             req = req.set(k, v);
         }
-        if let Some(sid) = self.session.lock().unwrap().clone() {
+        if let Some(sid) = lock_or_recover(&self.session).clone() {
             req = req.set("Mcp-Session-Id", &sid);
         }
 
@@ -513,7 +522,7 @@ impl HttpTransport {
         // Remember the session id the server issued (or refreshed).
         if let Some(sid) = resp.header("Mcp-Session-Id") {
             if !sid.is_empty() {
-                *self.session.lock().unwrap() = Some(sid.to_string());
+                *lock_or_recover(&self.session) = Some(sid.to_string());
             }
         }
 
@@ -606,15 +615,31 @@ fn truncate(s: &str, max: usize) -> String {
 /// (messages with an `id`) back to the waiting request thread.
 fn reader_loop(stdout: std::process::ChildStdout, responses: RespMap) {
     let mut reader = BufReader::new(stdout);
-    while let Ok(msg) = read_message(&mut reader) {
-        if let Some(id) = msg.get("id").and_then(|i| i.as_u64()) {
-            if let Some(tx) = responses.lock().unwrap().remove(&id) {
-                let _ = tx.send(msg);
+    let failure = loop {
+        match read_message(&mut reader) {
+            Ok(msg) => {
+                if let Some(id) = msg.get("id").and_then(|i| i.as_u64()) {
+                    if let Some(tx) = lock_or_recover(&responses).remove(&id) {
+                        let _ = tx.send(msg);
+                    }
+                }
+                // Notifications (no id) are silently dropped for now.
             }
+            Err(e) => break e,
         }
-        // Notifications (no id) are silently dropped for now.
+    };
+    // Dropping the pending senders wakes every waiting request immediately
+    // instead of making each one sit out the full 60 s timeout.
+    lock_or_recover(&responses).clear();
+    // A closed pipe is the normal shutdown path; a framing error is not.
+    if failure != "MCP server closed stdout" {
+        eprintln!("warning: MCP server connection lost: {failure}");
     }
 }
+
+/// Largest MCP frame we are willing to allocate. A buggy or hostile server
+/// could otherwise make `vec![0; content_length]` allocate hundreds of GB.
+const MAX_MCP_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
 
 fn read_message(r: &mut impl BufRead) -> Result<Value, String> {
     let mut content_length = 0usize;
@@ -628,12 +653,20 @@ fn read_message(r: &mut impl BufRead) -> Result<Value, String> {
         if line.is_empty() {
             break; // end of headers
         }
-        if let Some(v) = line.strip_prefix("Content-Length:") {
-            content_length = v.trim().parse().unwrap_or(0);
+        // Header names are case-insensitive.
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
         }
     }
     if content_length == 0 {
         return Err("MCP message missing Content-Length".to_string());
+    }
+    if content_length > MAX_MCP_MESSAGE_BYTES {
+        return Err(format!(
+            "MCP message too large ({content_length} > {MAX_MCP_MESSAGE_BYTES} bytes)"
+        ));
     }
     let mut buf = vec![0u8; content_length];
     r.read_exact(&mut buf).map_err(|e| e.to_string())?;

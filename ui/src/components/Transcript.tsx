@@ -349,7 +349,13 @@ const Message = memo(function Message({
           </div>
         </div>
         {zoom && (
-          <div className="lightbox" onClick={() => setZoom(null)}>
+          <div
+            className="lightbox"
+            role="dialog"
+            aria-modal="true"
+            aria-label="图片预览（按 Esc 关闭）"
+            onClick={() => setZoom(null)}
+          >
             <img src={zoom} alt="附件放大预览" />
           </div>
         )}
@@ -437,13 +443,23 @@ const ToolRow = memo(function ToolRow({ m }: { m: Msg }) {
 
 function CopyButton({ text, label = "复制" }: { text: string; label?: string }) {
   const [done, setDone] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  // Virtual scrolling unmounts rows; without cleanup every click would leave a
+  // timer that later calls setState on a gone component.
+  useEffect(
+    () => () => {
+      if (timer.current !== undefined) window.clearTimeout(timer.current);
+    },
+    [],
+  );
   return (
     <button
       title={label}
       onClick={() => {
         copyText(text);
         setDone(true);
-        window.setTimeout(() => setDone(false), 1200);
+        if (timer.current !== undefined) window.clearTimeout(timer.current);
+        timer.current = window.setTimeout(() => setDone(false), 1200);
       }}
     >
       <Icon name="copy" />

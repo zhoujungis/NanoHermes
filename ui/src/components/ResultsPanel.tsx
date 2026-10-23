@@ -81,10 +81,12 @@ export function ResultsPanel({
   return (
     <aside className={"aside" + (hidden ? " collapsed" : "")}>
       <div className="as-head">
-        <div className="as-tabs">
+        <div className="as-tabs" role="tablist" aria-label="结果区视图">
           {TABS.map(([value, label]) => (
             <button
               key={value}
+              role="tab"
+              aria-selected={tab === value}
               className={tab === value ? "on" : ""}
               onClick={() => setPanelTab(value)}
             >
@@ -100,10 +102,11 @@ export function ResultsPanel({
       </div>
 
       {tab === "artifacts" && (
-        <div className="as-filters">
+        <div className="as-filters" role="group" aria-label="文件筛选">
           {FILTERS.map(([value, label]) => (
             <button
               key={value}
+              aria-pressed={st.filter === value}
               className={"fchip" + (st.filter === value ? " on" : "")}
               onClick={() => setFilter(value)}
             >

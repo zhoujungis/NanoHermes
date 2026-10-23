@@ -38,6 +38,18 @@ const OK_ATTR: Record<string, string[]> = {
   TD: ["align"],
 };
 
+// Markdown 渲染器自己产生的类名。模型输出可以写任意 class，若原样放行，
+// 一句 `<div class="lightbox">` 就能盖住整个界面（这些类在 shell.css 里是
+// position:fixed + 全屏遮罩）。
+const OK_CLASS = /^(language-[A-Za-z0-9_+-]+|hljs|hljs-[A-Za-z0-9_-]+|task-list-item|contains-task-list)$/;
+
+function filterClasses(el: HTMLElement): void {
+  const raw = el.getAttribute("class") || "";
+  const kept = raw.split(/\s+/).filter((c) => c && OK_CLASS.test(c));
+  if (kept.length) el.setAttribute("class", kept.join(" "));
+  else el.removeAttribute("class");
+}
+
 export function sanitize(html: string): string {
   const doc = new DOMParser().parseFromString(html, "text/html");
   doc.body.querySelectorAll<HTMLElement>("*").forEach((el) => {
@@ -54,6 +66,7 @@ export function sanitize(html: string): string {
     Array.from(el.attributes).forEach((a) => {
       if (!allowed.includes(a.name.toLowerCase())) el.removeAttribute(a.name);
     });
+    if (allowed.includes("class")) filterClasses(el);
     if (tag === "A") {
       const href = el.getAttribute("href") || "";
       if (!/^https?:\/\//i.test(href)) el.removeAttribute("href");

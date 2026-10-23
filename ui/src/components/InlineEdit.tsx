@@ -46,7 +46,9 @@ export function InlineEdit({
   return (
     <input
       ref={ref}
-      className="inline-input"
+      // Keep the container's layout class: dropping it made the input lose
+      // flex/min-width and push the row's buttons out of the panel.
+      className={"inline-input" + (className ? " " + className : "")}
       value={draft}
       spellCheck={false}
       onChange={(e) => setDraft(e.target.value)}

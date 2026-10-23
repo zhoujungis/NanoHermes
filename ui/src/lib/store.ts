@@ -338,6 +338,13 @@ function flushSave(): void {
 
 /** 待写入 localStorage 的精简快照；`dropImages` 用于配额不足时的降级重试。 */
 function snapshot(dropImages: boolean) {
+  // 流式期间真正的文本在独立通道里，状态中的气泡还是 `t: ""`。直接落盘会存下
+  // 一个 `streaming: true` 的空气泡——下次启动时它永远转圈，而且没有终态文本可
+  // 以恢复。落盘前把实时文本合进去，并清掉所有 streaming 标记。
+  const liveId = streamIndex >= 0 ? runTaskId ?? state.activeId : null;
+  const liveIndex = liveId ? streamIndex : -1;
+  const liveText = streamText + pendingDelta;
+
   return {
     activeId: state.activeId,
     tasks: state.tasks.slice(-MAX_TASKS).map((t) => ({
@@ -346,8 +353,17 @@ function snapshot(dropImages: boolean) {
       createdAt: t.createdAt,
       updatedAt: t.updatedAt,
       msgs: t.msgs
-        .slice(-MAX_MSGS)
-        .map((m) => (dropImages && m.imgs?.length ? { ...m, imgs: undefined } : m)),
+        .map((m, i) => {
+          const flushed =
+            t.id === liveId && i === liveIndex && m.k === "ai" && liveText.trim()
+              ? liveText
+              : m.t;
+          const next = m.streaming ? { ...m, t: flushed, streaming: false } : m;
+          return dropImages && next.imgs?.length ? { ...next, imgs: undefined } : next;
+        })
+        // 空的 AI 气泡没有意义（模型先调用工具是常态），不要持久化。
+        .filter((m) => !(m.k === "ai" && !m.t && !m.imgs?.length))
+        .slice(-MAX_MSGS),
       files: t.files.slice(-MAX_FILES),
       location: t.location || "local",
       workspace: t.workspace || "",
@@ -388,7 +404,13 @@ function load(): void {
         title: t.title || "新任务",
         createdAt: t.createdAt || Date.now(),
         updatedAt: t.updatedAt || t.createdAt || Date.now(),
-        msgs: Array.isArray(t.msgs) ? t.msgs : [],
+        // 旧版本可能在流式中途落盘，留下 `streaming: true` 的空气泡；清掉标记，
+        // 避免加载后永远转圈。
+        msgs: Array.isArray(t.msgs)
+          ? t.msgs
+              .map((m) => (m?.streaming ? { ...m, streaming: false } : m))
+              .filter((m) => !(m?.k === "ai" && !m.t && !m.imgs?.length))
+          : [],
         files: Array.isArray(t.files) ? t.files : [],
         location: t.location === "cloud" ? "cloud" : "local",
         workspace: typeof t.workspace === "string" ? t.workspace : "",
@@ -638,8 +660,11 @@ async function rebind(id: string): Promise<void> {
       model: task?.model || null,
       persona: task?.persona || null,
     });
-  } catch {
-    /* 未配置密钥等情况下 agent 构建失败，发送时再报错即可 */
+  } catch (e) {
+    // 不要静默吞掉：界面已经显示新选择，后端若仍绑着旧配置，用户只会看到
+    // 「模型/文件夹明明换了却不生效」。构建失败（缺密钥等）会在发送时单独报错，
+    // 这里只报真正没能重绑的情况。
+    toast("切换任务配置失败：" + errText(e), "err");
   }
 }
 
@@ -765,6 +790,13 @@ export async function resetCurrent(): Promise<void> {
 }
 
 export async function deleteTask(id: string): Promise<void> {
+  // Deleting the task that owns the in-flight turn would orphan the run: its
+  // stream writes would no-op and the trailing `finally` would clear `busy` on
+  // whatever task happens to be open.
+  if (runTaskId === id) {
+    toast("该任务正在执行，请先停止");
+    return;
+  }
   const index = state.tasks.findIndex((t) => t.id === id);
   if (index < 0) return;
   const tasks = state.tasks.filter((t) => t.id !== id);
@@ -792,12 +824,11 @@ export function renameTask(id: string, title: string): void {
 }
 
 export async function setMode(mode: string): Promise<void> {
-  // settings.mode 必须一起更新：设置页落盘时写的是 state.settings，
-  // 只改 state.mode 会把旧模式悄悄写回后端。
-  commit({
-    mode,
-    settings: state.settings ? { ...state.settings, mode } : state.settings,
-  });
+  // 持久化走常规设置通道（save_settings_cmd 是唯一写盘者，按到达顺序落盘）；
+  // 后端的 set_mode 只更新活动 agent 与内存设置，不再自己写整份快照，
+  // 否则可能用一份缺少并发改动的旧快照覆盖 API Key。
+  if (state.settings) autosaveSettings({ ...state.settings, mode });
+  else commit({ mode });
   try {
     await invoke("set_mode", { mode });
   } catch (e) {
@@ -878,17 +909,25 @@ function recordTouch(name: string, summary: string): void {
   scheduleSave();
 }
 
+/** 每次打开预览递增；只有最后一次请求的响应能写回，避免慢响应覆盖新选择。 */
+let previewSeq = 0;
+
 export async function openPreview(path: string): Promise<void> {
+  const seq = ++previewSeq;
   commit({ preview: { path, text: null, loading: true, error: null } });
   try {
     const text = await invoke<string>("read_file_preview", { path });
+    if (seq !== previewSeq) return;
     commit({ preview: { path, text: text || "", loading: false, error: null } });
   } catch (e) {
+    if (seq !== previewSeq) return;
     commit({ preview: { path, text: null, loading: false, error: errText(e) } });
   }
 }
 
 export function closePreview(): void {
+  // 关闭后到达的旧响应不能再把预览窗重新打开。
+  previewSeq++;
   if (state.preview) commit({ preview: null });
 }
 
@@ -1204,16 +1243,25 @@ async function runTurn(
     } else if (response?.trim()) {
       pushMsg({ k: "ai", t: response, ts: Date.now() });
     }
-    if (!produced && !(response && response.trim())) {
+    // 主动停止时没有输出是正常的，不要补一条「空响应」。
+    if (!state.stopping && !produced && !(response && response.trim())) {
       pushMsg({ k: "ai", t: "（空响应）", ts: Date.now() });
     }
   } catch (e) {
     const msg = errText(e);
+    // 用户主动停止时连接被后端主动断开（或读超时），不是故障：保留已有输出，
+    // 不要补红色错误气泡；收尾的 finally 会给出「任务已停止」回执。
+    const stopped = state.stopping;
     forceFlush();
     const streamed = streamText;
     const i = streamIndex;
     streamIndex = -1;
-    if (i >= 0 && streamed.trim()) {
+    if (stopped) {
+      if (i >= 0) {
+        if (streamed.trim()) setMsg(i, { t: streamed, streaming: false });
+        else dropMsg(i);
+      }
+    } else if (i >= 0 && streamed.trim()) {
       // 已经输出了一部分：保留内容，把中断原因作为备注追加在后面。
       setMsg(i, { t: streamed, streaming: false });
       pushMsg({ k: "note", t: "运行中断：" + msg, ts: Date.now() });

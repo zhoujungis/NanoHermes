@@ -167,7 +167,12 @@ pub(crate) fn read_capped(mut r: impl Read) -> (Vec<u8>, usize) {
     (kept, total)
 }
 
+/// Tool calls in one turn run concurrently, so two gated commands could prompt
+/// at the same time and steal each other's answer. Serialise the prompt.
+static CONFIRM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn confirm(command: &str) -> bool {
+    let _guard = CONFIRM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     eprint!("Run this command? [y/N] {command}\n> ");
     let _ = io::stderr().flush();
     let mut line = String::new();

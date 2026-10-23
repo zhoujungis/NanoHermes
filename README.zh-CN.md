@@ -11,7 +11,7 @@
 - **主题** —— 三套配色（石墨、午夜、素笺）加「跟随系统」，可在设置或 `Ctrl+K` 中切换；界面所有颜色都走 CSS 变量，换主题即换一套调色板。
 - **兼容 OpenAI 协议** — 可对接 OpenAI、本地模型（Ollama、vLLM、llamafile）或任何支持 chat-completions 格式的端点。
 - **流式输出** — 助手 token 边生成边打印。
-- **容错** — 瞬时 API 故障（HTTP 429/5xx）按指数退避重试；重试耗尽后由可选的 `--fallback-model` 接管。
+- **容错** — 瞬时 API 故障（HTTP 429/5xx）按指数退避重试；重试耗尽后由可选的 `--fallback-model` 接管。一旦已有文字流式送达用户，就不再重试，避免回答出现重复前缀。
 - **内置工具** — `read_file`、`write_file`、`edit_file`、`apply_patch`、`list_dir`、`grep`、`glob`、`run_command`、`web_fetch`、`web_search`、`todo_write`、`todo_read`、`git_status`、`git_diff`、`git_log`、`git_commit`、`task_output`、`task_list`、`task_kill`。条件性工具：`skill`（发现技能时）、`subagent` / `agent_list`（配置子代理时）、`memory_save` / `memory_search`（开启长期记忆时）。
 - **计划清单** — `todo_write` / `todo_read` 让模型拟定并在多轮间跟踪任务清单。
 - **Git** — `git_status` / `git_diff` / `git_log` 查看仓库状态；`git_commit` 可暂存并提交（需用户确认）。
@@ -20,13 +20,13 @@
 - **MCP 支持** — 通过 stdio 或 streamable HTTP 连接外部 MCP 服务器，自动发现并调用其工具。
 - **MCP 资源与提示词** — 通过专用 agent 工具浏览和读取 MCP 资源、列出和渲染 MCP 提示词。
 - **项目规则** — 将 `AGENTS.md`（全局 `~/.nanohermes/AGENTS.md` 以及工作区的每一级祖先目录）注入系统提示作为项目规则（上限 20 KB，自动去重）。
-- **长期记忆** — 一轮对话完成后，agent 会把经验、偏好、纠正与事实沉淀到 `~/.nanohermes/memory.json`；下一轮按相关度检索并注入系统提示。打分使用本地 BM25（英文按小写单词、中文按二元切分），不需要额外服务；模型也可以通过 `memory_save` / `memory_search` 主动读写记忆。
+- **长期记忆** — 一轮对话完成后，agent 会把经验、偏好、纠正与事实沉淀到 `~/.nanohermes/memory.json`；下一轮按相关度检索并注入系统提示。打分使用本地 BM25（英文按小写单词、中文按单字与二元切分），不需要额外服务；模型也可以通过 `memory_save` / `memory_search` 主动读写记忆。
 - **技能（Skills）** — 从 `.nanohermes/skills/<name>/SKILL.md` 发现的可复用指令包。系统提示中只放入名称与描述，模型通过 `skill` 工具按需加载完整指令（渐进式披露）。
 - **生命周期钩子** — 在配置文件中定义 `PreToolUse` / `PostToolUse` shell 钩子。`PreToolUse` 钩子可拦截工具调用；`PostToolUse` 钩子只能追加警告。
 - **子代理** — 将聚焦的子任务委派给已配置的子代理，并行执行（并发有上限），记录在任务板上，可用 `agent_list` 查看。
-- **沙箱与审批** — 为派生的命令提供 Linux Landlock 文件系统沙箱（`read-only` / `workspace-write`），以及三级审批策略（`never` / `on-request` / `untrusted`），并内置只读命令识别。
-- **并行工具调用** — 当模型在一轮中返回多个工具调用时，并发执行。
-- **会话持久化** — 通过 `--session` 将对话历史保存和恢复到 JSON 文件。
+- **沙箱与审批** — `read-only` / `workspace-write` 文件系统沙箱由所有写文件的工具强制执行，派生命令另由 Linux Landlock 约束；再加三级审批策略（`never` / `on-request` / `untrusted`）与内置只读命令识别。
+- **并行工具调用** — 当模型在一轮中返回多个工具调用时，并发执行（每次最多 8 个）。
+- **会话持久化** — 通过 `--session` 将对话历史保存和恢复到 JSON 文件；`-c` 续接当前目录最近的会话，`-r` 交互选择一个会话。
 - **多模态输入** — 通过 `--image`（单次执行）或 `/image`（REPL）附加图片，供支持视觉的模型使用。
 - **上下文压缩** — 当对话超过预算时，较早的消息会由模型生成摘要替代，而非静默丢弃。
 - **中断与回退** — Ctrl-C 中止当前轮次而不杀死进程（对话保留）；`/undo [n]` 可回退一个或多个完整用户轮次。
@@ -96,7 +96,7 @@ cd gui && npx --no-install tauri build   # release 构建 + 打包安装程序
 
 - 每个任务拥有自己的对话和自己的工作区文件夹。本机任务绑定文件夹选择器里选中的目录（也可直接输入路径），所有工具调用的相对路径都相对它解析。
 - 执行位置是任务级的：`local` 在应用进程内运行，`cloud` 把这一轮转发给远程 daemon（见 [HTTP daemon 模式](#http-daemon-模式)）并带上 `X-Session-Id`，因此每个任务在服务端也有独立对话。
-- 本机任务可在步骤边界停止；云端任务无法取消，因为整次请求由 daemon 持有。
+- 本机任务可在步骤边界停止；云端任务在 daemon 发出下一个流事件时停止（整次请求仍由 daemon 持有）。
 - 置顶的任务会单独成一组、固定排在列表最前，不参与「今天／昨天／本周」的日期分组；在任务菜单或 `Ctrl+K` 里切换。
 
 ### 权限模式
@@ -107,7 +107,7 @@ cd gui && npx --no-install tauri build   # release 构建 + 打包安装程序
 | `accept-edits` | Accept | 自动执行文件修改，命令仍需确认。 |
 | `plan` | Plan | 只读分析：不写文件、不执行命令。 |
 | `goal` | Goal | 目标模式：无人值守，所有工具自动执行直到完成。 |
-| `debug` | Debug | 诊断模式：可读文件、可执行命令以复现问题，但不修改文件。 |
+| `debug` | Debug | 诊断模式：可读文件、可执行命令以复现问题；编辑工具被禁用，但 shell 命令仍可能修改文件（需要硬保证时配合 `--sandbox read-only`）。 |
 
 模式存在设置里作为新任务默认值，也可以在输入区或命令面板切换。这仅对本机任务生效：云端任务使用 daemon 启动时固定的权限模式（见 [在 VPS 上部署 daemon](#在-vps-上部署-daemon)）。
 
@@ -117,7 +117,8 @@ cd gui && npx --no-install tauri build   # release 构建 + 打包安装程序
 - `↑` / `↓` 在光标位于首行 / 末行时翻阅输入历史；翻回最新一条时恢复原先未发送的草稿。
 - `@` 打开工作区文件选择器，并把选中路径插入光标处。
 - `+` 打开工作区文件选择器，选中的文件会内联进提示词。
-- 运行中发送按钮变为**停止**。停止请求在下一个步骤边界生效：按钮保持转圈禁用，任务条显示 `停止中`，本轮收尾时提示「任务已停止」并把焦点交回输入框。运行中按 `Enter` 不会被静默丢弃，而是提示先完成或停止。
+- 运行中发送按钮变为**停止**。停止请求在下一个步骤边界生效（云端任务则是在 daemon 发出下一个流事件时）：按钮保持转圈禁用，任务条显示 `停止中`，本轮收尾时提示「任务已停止」并把焦点交回输入框。
+- 运行中按 `Enter` 会把消息加入队列，而不是丢字。正常结束后队列自动续发；主动停止后队列会保留，由你决定何时发送。
 - 模式切换左侧的模型胶囊用来选本任务使用哪个模型档案；每个任务各自记住自己的选择，选项来自**设置 → 模型**里的列表。
 - 模型胶囊旁的人设胶囊用来选本任务使用哪套人设（附加系统提示词）；附加了指令的人设会高亮，选项来自**设置 → 人设**里的列表。
 - 闪电按钮打开**提示词片段**菜单，点一下就把该段文字插到当前输入末尾；片段在**设置 → 提示词片段**里维护。
@@ -191,13 +192,40 @@ agent --base-url http://localhost:11434/v1 -m llama3 "列出文件"
 
 ## 配置
 
-NanoHermes 通过环境变量和 CLI 参数配置，CLI 参数优先。
+NanoHermes 通过配置文件、环境变量和 CLI 参数配置。优先级：**CLI 参数 > 配置文件 > 环境变量**。
 
 | 环境变量 | 等价参数 | 默认值 | 说明 |
 |----------|---------|--------|------|
 | `NANOHERMES_API_KEY` / `OPENAI_API_KEY` | `-k, --api-key` | _(空)_ | 端点的 API key |
 | `NANOHERMES_BASE_URL` / `OPENAI_BASE_URL` | `-u, --base-url` | `https://api.openai.com/v1` | 兼容 OpenAI 的 base URL |
 | `NANOHERMES_MODEL` / `OPENAI_MODEL` | `-m, --model` | `gpt-4o-mini` | 模型名称 |
+| `NANOHERMES_CONFIG` | `--config` | `~/.nanohermes/config.json` | 未传 `--config` 时加载的配置文件 |
+| `NANOHERMES_DAEMON_TOKEN` | `--daemon-token` | _(空)_ | daemon 请求的 Bearer token |
+| `NANOHERMES_MAX_RETRIES` | `--max-retries` | `2` | 瞬时故障重试次数 |
+| `NANOHERMES_RETRY_BASE_MS` | `--retry-base-ms` | `500` | 重试的基础退避间隔 |
+
+### 配置文件
+
+除环境变量和参数外，NanoHermes 也读取 JSON 配置文件。`~/.nanohermes/config.json` 存在时会自动加载；`--config <FILE>`（或 `NANOHERMES_CONFIG`）可指定其他文件。加载顺序是环境变量 → 配置文件 → CLI 参数，因此配置文件会覆盖环境变量，CLI 参数再覆盖配置文件。`--print-config` 打印最终解析结果后退出。
+
+```json
+{
+  "base_url": "https://openrouter.ai/api/v1",
+  "model": "anthropic/claude-sonnet-4",
+  "permission_mode": "accept-edits",
+  "approval_policy": "on-request",
+  "sandbox": "workspace-write",
+  "thinking": true,
+  "project_docs": true,
+  "memory": true,
+  "allowed_tools": ["read_file", "grep", "edit_file"],
+  "hooks": [
+    { "event": "PreToolUse", "matcher": "run_command", "command": "./scripts/check.sh" }
+  ]
+}
+```
+
+支持的键：`api_key`、`base_url`、`model`、`temperature`、`max_tokens`、`stream`、`max_iterations`、`cwd`、`auto_approve`、`approval_policy`、`sandbox`、`timeout_secs`、`max_retries`、`retry_base_ms`、`mcp_config`、`session`、`permission_mode`、`allowed_tools`、`disallowed_tools`、`fallback_model`、`output_format`、`input_format`、`continue_session`、`resume_session`、`thinking`、`project_docs`、`memory`、`memory_dir`、`system_prompt`、`daemon`、`daemon_port`、`daemon_bind`、`daemon_token`、`subagents_config`、`hooks`。
 
 ### CLI 参数
 
@@ -210,6 +238,7 @@ echo "PROMPT" | agent [OPTIONS]  从 stdin 读取提示并单次执行
 | 参数 | 说明 |
 |------|------|
 | `-m, --model <NAME>` | 模型名称 |
+| `--fallback-model <NAME>` | 主模型重试耗尽后改用的备用模型 |
 | `-u, --base-url <URL>` | 兼容 OpenAI 的 base URL（不含 `/chat/completions`） |
 | `-k, --api-key <KEY>` | API key |
 | `-C, --cwd <DIR>` | 工作区根目录（默认：当前目录） |
@@ -217,6 +246,8 @@ echo "PROMPT" | agent [OPTIONS]  从 stdin 读取提示并单次执行
 | `--mcp-config <FILE>` | MCP 服务器配置 JSON 路径（启用 MCP 工具） |
 | `--subagents <FILE>` | 子代理配置 JSON 路径（启用 `subagent` / `agent_list` 工具） |
 | `--session <FILE>` | 将对话历史持久化到 FILE（启动时若存在则加载） |
+| `-c, --continue` | 续接当前工作区最近记录的那个会话 |
+| `-r, --resume` | 列出已保存会话并交互选择一个续接 |
 | `-n, --max-iterations <N>` | 每轮模型↔工具的最大往返次数（默认 40） |
 | `--max-tokens <N>` | 最大响应 token 数（默认 4096） |
 | `--temperature <F>` | 采样温度（默认 0.0） |
@@ -224,10 +255,19 @@ echo "PROMPT" | agent [OPTIONS]  从 stdin 读取提示并单次执行
 | `--max-retries <N>` | 瞬时 API 故障重试次数（默认 2，环境变量 `NANOHERMES_MAX_RETRIES`） |
 | `--retry-base-ms <MS>` | 重试的基础退避间隔（默认 500，环境变量 `NANOHERMES_RETRY_BASE_MS`） |
 | `--no-stream` | 关闭流式输出（缓冲响应） |
+| `--output-format <FMT>` | `text`（默认）、`json`（stdout 输出单个 JSON 对象）或 `stream-json`（逐行事件） |
+| `--input-format <FMT>` | `text`（默认）或 `stream-json`（按 JSON 行解析 stdin） |
+| `--thinking` | 请求扩展思考（`reasoning_effort: high`） |
 | `--ask` | 每条 shell 命令执行前确认（`untrusted` 策略） |
 | `--approval-policy <POLICY>` | 何时确认 shell 命令：`never` \| `on-request` \| `untrusted`（默认 `never`，即自动批准） |
-| `--sandbox <MODE>` | 派生命令的文件系统沙箱：`off` \| `read-only` \| `workspace-write`（Linux/Landlock） |
 | `-y, --yes` | 自动批准 shell 命令（`never` 策略；默认） |
+| `--sandbox <MODE>` | 文件系统沙箱：`off`（默认）\| `read-only` \| `workspace-write`。文件工具在所有平台生效；派生命令在 Linux 上使用 Landlock |
+| `--permission-mode <MODE>` | `default` \| `accept-edits` \| `plan` \| `goal` \| `debug`（见[权限模式](#权限模式)） |
+| `--allowed-tools <LIST>` | 逗号分隔的工具允许列表 |
+| `--disallowed-tools <LIST>` | 逗号分隔的工具禁止列表；`*` 禁止所有工具（含 MCP 与记忆工具） |
+| `--mode <MODE>` | 预设组合：`minimal`（零工具）\| `create`（仅文件工具，不执行 shell） |
+| `--config <FILE>` | 从指定 JSON 配置文件加载（替代 `~/.nanohermes/config.json`） |
+| `--print-config` | 打印最终配置 JSON 后退出 |
 | `--no-project-docs` | 不将 `AGENTS.md` 加载进系统提示 |
 | `--daemon` | 以 HTTP daemon 运行：`POST {"prompt":"..."}` → `{"response":"..."}` |
 | `--daemon-port <PORT>` | daemon 监听端口（默认 8787） |
@@ -247,7 +287,7 @@ echo "PROMPT" | agent [OPTIONS]  从 stdin 读取提示并单次执行
 | `/clear` | 重置对话（保留系统提示） |
 | `/undo [n]` | 回退最近 `n` 个完整用户轮次（默认 1） |
 | `/model <name>` | 切换当前模型 |
-| `/mode <mode>` | 切换权限模式（`default`、`accept-edits`、`plan`） |
+| `/mode <mode>` | 切换权限模式（`default`、`accept-edits`、`plan`、`goal`、`debug`） |
 | `/format <fmt>` | 切换输出格式（`text`、`json`、`stream-json`） |
 | `/tools` | 列出可用工具 |
 | `/status` | 显示会话统计 |
@@ -264,7 +304,7 @@ echo "PROMPT" | agent [OPTIONS]  从 stdin 读取提示并单次执行
 
 ## 内置工具
 
-所有路径相对于工作区根目录解析，除非是绝对路径。
+所有路径相对于工作区根目录解析，除非是绝对路径。配置了沙箱时，写文件的工具（`write_file`、`edit_file`、`apply_patch`）会强制执行：`read-only` 拒绝写入，`workspace-write` 拒绝工作区之外的路径。
 
 ### `read_file`
 读取文本文件并带行号。
@@ -325,7 +365,7 @@ echo "PROMPT" | agent [OPTIONS]  从 stdin 读取提示并单次执行
 结果上限为 200 条匹配。
 
 ### `glob`
-按 glob 模式在工作区根目录下查找文件。支持 `*`、`?` 和 `**`。
+按 glob 模式在工作区根目录下查找文件。支持 `*`、`?` 和 `**`。按字符匹配，因此 `?` 匹配一个中文字符；病态模式（大量嵌套 `**`）受工作量预算约束，不会卡死一轮。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
@@ -352,7 +392,7 @@ stdout 和 stderr 会被捕获（各上限 256 KB）并连同退出码一起返�
 | `url` | string | _(必填)_ | `http://` 或 `https://` 网址 |
 | `max_chars` | integer | 20000 | 返回文本的最大字符数（500–200000） |
 
-响应体上限为 2 MB，超出部分会被截断。
+响应体上限为 2 MB，超出部分会被截断。回环、私有、链路本地与云元数据地址会被拒绝，重定向的每一跳都会重新校验，因此被注入的网页内容无法把该工具变成对主机或内网的 SSRF 探针。
 
 ### `web_search`
 联网搜索（DuckDuckGo HTML 端点），返回若干结果的标题 / 网址 / 摘要。可对结果网址继续调用 `web_fetch` 阅读页面。
@@ -363,7 +403,7 @@ stdout 和 stderr 会被捕获（各上限 256 KB）并连同退出码一起返�
 | `count` | integer | 5 | 结果数量（1–10） |
 
 ### `todo_write` / `todo_read`
-维护当前会话的有序任务清单。`todo_write` 会整体替换清单（并在终端回显），让模型拟定计划并更新进度；`todo_read` 返回当前清单。
+维护当前会话的有序任务清单。`todo_write` 会整体替换清单，并作为状态说明展示（终端输出到 stderr，GUI 收到 `Note` 事件），让模型拟定计划并更新进度，同时不污染 `json` 输出；`todo_read` 返回当前清单。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
@@ -446,10 +486,11 @@ agent --mcp-config mcp.json "列出 MCP 服务器暴露的文件"
 
 ## 并行工具调用
 
-当模型在一条 assistant 消息中返回多个 `tool_calls` 时，NanoHermes 使用 scoped 线程**并发**执行它们。结果按调用顺序收集后统一追加，因此每个 `tool_call_id` 都与正确的结果配对，不受执行完成顺序影响。
+当模型在一条 assistant 消息中返回多个 `tool_calls` 时，NanoHermes 使用 scoped 线程**并发**执行它们，每批最多 8 个。结果按调用顺序收集后统一追加，因此每个 `tool_call_id` 都与正确的结果配对，不受执行完成顺序影响。
 
 - 内置工具并行运行（它们不共享可变状态）。
 - MCP 工具调用在同一服务器内串行（在服务器的 stdin 锁上），但跨不同服务器并行。
+- 超过 8 个的调用进入下一批，避免一轮对话同时起几百个系统线程和 shell 进程。
 - 单个工具调用走直接路径，无线程开销。
 
 ## 项目规则（AGENTS.md）
@@ -545,6 +586,8 @@ description: 发布流程：升版本号、更新 changelog、打 tag 并推送�
 | `read-only` | 可任意读 + 执行；完全不可写 |
 | `workspace-write` | 可任意读 + 执行；仅允许在工作区内写 |
 
+写文件的工具（`write_file`、`edit_file`、`apply_patch`）在所有平台都遵守同一模式：`read-only` 拒绝写入，`workspace-write` 拒绝解析到工作区之外的路径，因此 agent 不能改用“编辑文件”来绕过沙箱。
+
 沙箱在子进程 `fork` 之后、`exec` 之前安装，因此同样覆盖该命令派生的所有进程。若内核不支持 Landlock，NanoHermes 会**拒绝**运行命令，而非静默降级。仅使用裸系统调用——无外部 crate。
 
 ## 中断与回退
@@ -565,10 +608,12 @@ agent --daemon --daemon-port 8787 \
 
 | 端点 | 方法 | 鉴权 | 说明 |
 |------|------|------|------|
-| `/` | `POST` | Bearer token（如设置） | 请求体 `{"prompt": "..."}` → `{"response": "...", "session": "<id>"}` |
+| `/` | `POST` | Bearer token（如设置） | 请求体 `{"prompt": "..."}`（可选 `"stream": true`、`"images": ["data:image/...;base64,..."]`）→ `{"response", "session", "usage"}`；`stream: true` 时返回逐行 JSON |
 | `/health` | `GET` | 无 | 返回 `{"status":"ok","sessions":N}`，用于存活探针 |
 
 - 对话**按会话隔离**。发送 `X-Session-Id: <名称>` 头选择一个对话；不同 id 的请求绝不共享上下文。省略该头则使用 `default` 会话。每个会话持久化为 `--session` 目录下独立的 JSON 文件。
+- 会话 id 会作为文件名使用，因此会校验（`[A-Za-z0-9._-]`，最多 64 字符，不允许前导点或 Windows 设备名）。请求体上限 64 MB，进程最多保留 256 个不同会话，异常客户端无法耗尽内存或磁盘。
+- `"stream": true` 时 daemon 下发 NDJSON 事件：`{"type":"delta","text":...}`、`{"type":"tool","name","summary","output"}`、`{"type":"note","text"}`、`{"type":"usage","requests","prompt_tokens","completion_tokens"}`，最后是 `{"type":"done","response",...}` 或 `{"type":"error","error"}`。云端流式轮次可从桌面端停止，daemon 在下一个事件边界察觉。
 - daemon 默认绑定 `127.0.0.1`。仅在受信任的反向代理/隧道之后才设置 `--daemon-bind 0.0.0.0`。
 - 当端口可被 localhost 以外访问时，**务必设置 token**（`--daemon-token` 或 `NANOHERMES_DAEMON_TOKEN`）。没有有效 `Authorization: Bearer <token>` 头的请求返回 `401`。
 - 生产环境建议放在反向代理（如 Cloudflare Tunnel、Caddy、nginx）后面终止 TLS，daemon 保持 loopback。
@@ -658,7 +703,7 @@ daemon 只讲明文 HTTP，默认监听 `127.0.0.1:8787`。保持监听在本机
 
 1. **设置 → 执行位置**：选**云端**，填地址（`https://daemon.example.com:8443` 或隧道地址）和 `/opt/nanohermes/.daemon_token` 里的 Token，点**检查**（`GET /health`）。
 2. 之后新建任务可选云端；每个任务带自己的 `X-Session-Id`，对话在 daemon 上彼此隔离。
-3. 云端一轮完全按 daemon 的配置执行：模型档案、人设、高级参数与权限模式**都不会**从桌面端发过去。权限模式在 daemon 启动时由 `--permission-mode` 固定，要改只能重启服务。云端任务也无法中途取消——整次请求由 daemon 持有。
+3. 云端一轮完全按 daemon 的配置执行：模型档案、人设、高级参数与权限模式**都不会**从桌面端发过去。权限模式在 daemon 启动时由 `--permission-mode` 固定，要改只能重启服务。云端任务也可以从桌面端停止，但停止要等 daemon 发出下一个流事件才生效——整次请求仍由 daemon 持有，没有带外取消通道。
 
 ### 日常运维
 
@@ -682,11 +727,19 @@ agent --session work.json "重构 search 模块"
 
 # 之后恢复——历史从文件加载
 agent --session work.json
+
+# 续接当前目录最近记录的会话（不用记文件名）
+agent -c
+
+# 列出已保存会话并交互选择
+agent -r
 ```
+
+`-c` / `-r` 使用 `~/.nanohermes/sessions/` 目录，文件名由工作区路径的哈希决定；`--session` 仍使用你指定的路径。
 
 - 会话文件是一个 OpenAI 风格消息（system、user、assistant、tool）的 JSON 数组。
 - 写入是原子的（先写 `.tmp` 临时文件再 rename），因此写入中途崩溃不会截断会话。
-- 每轮结束后及 `/clear` 时保存文件。
+- 每轮结束后及 `/clear` 时保存文件——包括 API 失败的轮次，因此改好密钥重试后对话仍在。
 - 如果启动时无法加载文件，NanoHermes 回退到全新对话并打印警告。
 
 ## 上下文管理
@@ -715,12 +768,12 @@ agent -m gpt-4o -i a.png -i b.png "比较这两个图"
 
 - **无异步运行时。** HTTP 使用阻塞式 `ureq` 客户端；MCP I/O 每个服务器使用一个专用读取线程；工具调用在 scoped 系统线程上运行。这避免了 tokio/异步运行时的内存开销。
 - **极简依赖。** 仅 `serde_json`、`ureq`（含 TLS）和 `base64`。不使用 `serde` 派生宏（值以 `serde_json::Value` 处理）。不依赖 `libc`：Landlock 沙箱与 SIGINT 处理器通过一个极小的裸系统调用垫片（`agent/src/sys.rs`）直达内核。
-- **输出有界。** 工具结果限制为 20 KB；命令输出每个流上限 256 KB；文件读取拒绝超过 4 MB 的文件；项目规则与技能正文各上限 20 KB。这保证了上下文窗口和进程内存有界。
-- **线程安全。** `Server` 将其 `Child` 进程和读取线程的 `JoinHandle` 包在 `Mutex` 中，使 `Manager`（进而 `Agent`）为 `Sync`，从而支持安全的并发工具执行。
+- **工作量与输出有界。** 工具结果限制为 20 KB；命令输出每个流上限 256 KB；文件读取拒绝超过 4 MB 的文件；项目规则与技能正文最多读取 64 KB、注入上限 20 KB。glob 匹配有工作量预算（嵌套 `**` 不会卡死一轮），钩子 30 秒超时并配有限时收集，`git` 调用上限 60 秒。这保证了上下文窗口、进程内存与单轮延迟都有界。
+- **线程安全。** `Server` 将其 `Child` 进程和读取线程的 `JoinHandle` 包在 `Mutex` 中，使 `Manager`（进而 `Agent`）为 `Sync`，从而支持安全的并发工具执行。GUI 与 MCP 层的状态锁可从毒化中恢复，单个线程 panic 不会让后续调用全部失败。
 
 ## 桌面前端性能说明
 
-- **Tauri 命令不阻塞主线程。** 同步的 `#[tauri::command]` 会在窗口主线程上执行，任何磁盘读写或网络请求都会让整个界面卡住。因此凡是要碰文件系统、起子进程或发 HTTP 请求的命令都写成 `async fn`，把工作交给 `tauri::async_runtime::spawn_blocking`；只有纯内存的 `get_settings` 与 `stop_task` 保持同步。并发写入同一份设置时用静态互斥锁串行化，避免两次落盘乱序覆盖。
+- **Tauri 命令不阻塞主线程。** 同步的 `#[tauri::command]` 会在窗口主线程上执行，任何磁盘读写或网络请求都会让整个界面卡住。因此凡是要碰文件系统、起子进程或发 HTTP 请求的命令都写成 `async fn`，把工作交给 `tauri::async_runtime::spawn_blocking`；只有纯内存的 `get_settings` 与 `stop_task` 保持同步。并发保存设置时既串行化又保证顺序：每个命令记录到达序号，较旧的快照会被丢弃而不是覆盖新值；文件采用临时文件 + rename（损坏的文件会备份，而不是静默重置所有档案）。保存过程中不会重建 agent；一个待重绑标记让下一次本机轮次使用新设置。
 - **流式输出隔离。** 运行期间增量不写入全局 store，而是走独立订阅通道，只有正在输出的气泡订阅它；工具调用、整轮收尾等阶段边界才把文本一次性定稿，因此长篇回答不会重渲染侧栏、面板与顶栏。
 - **虚拟滚动。** 只挂载视口内（及邻近）的消息；最后一条气泡增长时跳过高度回测，跟随底部由流式通道直接设置 `scrollTop`，不触发 React 重渲染。
 - **增量 Markdown。** 流式期间按代码围栏外的空行切块：已稳定的块只渲染一次并保留 DOM，未闭合围栏只更新 `code` 文本节点；语法高亮在收尾时按代码块逐个补齐，而不是对整条回答一次性执行。
@@ -733,28 +786,30 @@ npm run build            # 前端：类型检查 + 打包
 ```
 
 Rust 测试套件包括：
-- 补丁应用（简单、多 hunk、插入、缺失上下文报错）
-- glob 匹配
+- 补丁应用（简单、多 hunk、纯插入、非 ASCII 上下文、缺失上下文报错）
+- glob 匹配（按字符的 `?`、有界的嵌套 `**`）
+- 文件工具沙箱：`read-only` 拒绝写入，`workspace-write` 拒绝工作区之外的路径
 - 针对 mock stdio 服务器的 MCP 资源/提示词列出与读取
 - MCP 工具自动分发
 - MCP streamable-HTTP 握手与工具调用
 - MCP 并发安全（并发混合请求、压力突发）
 - Agent `execute()` 并发（内置工具、混合 MCP + 内置）
-- HTML 转文本与搜索结果解析（联网工具）
+- 联网工具：SSRF 目标拒绝与重定向解析、HTML 转文本、搜索结果解析
 - 会话任务清单（`todo_write` / `todo_read`）
 - Git 工具（status / diff / commit / log 往返）
 - token 用量解析与重试退避计算
+- 针对本地 mock 端点的流式与非流式回复，含瞬时 5xx 重试与流截断处理
 - 多模态内容组装（文本 + 图片片段）
-- 会话保存/加载往返
+- 会话保存/加载往返（含失败的轮次）
 - 从 `AGENTS.md` 注入项目规则（及关闭）
 - 技能发现（frontmatter、回退命名、工作区覆盖）
-- 钩子执行（退出码、工具名匹配、stdin 载荷）
+- 钩子执行（退出码、工具名匹配、stdin 载荷；先写 stdout 再读 stdin 也不会死锁）
 - 子代理任务板顺序与并发闸门
-- 审批策略决策与可信命令识别
+- 审批策略决策与可信命令识别（git `-c`/`--git-dir` 与可写的“只读”工具均视为不可信）
 - Landlock 工作区边界强制
 - SIGINT 标志位设置/清除
-- 长期记忆（中文二元切分、BM25 排序、去重、提炼门槛）
-- 桌面外壳：NDJSON 流解析（增量、工具事件、错误与截断识别）、目录浏览、模型/daemon 地址归一化、云端位置解析、导出文件名清洗、输出截断，以及断言长耗时命令不会同步跑在主线程上的回归用例
+- 长期记忆（中文单字/二元切分、BM25 排序、淘汰顺序、去重、提炼门槛）
+- 桌面外壳：NDJSON 流解析（增量、工具事件、错误与截断识别）、目录浏览、模型/daemon 地址归一化、云端位置解析、会话 id 校验、导出文件名清洗、输出截断，以及断言长耗时命令不会同步跑在主线程上的回归用例
 
 测试使用的 mock MCP 服务器位于 `agent/tests/mock_mcp_server.py`。
 

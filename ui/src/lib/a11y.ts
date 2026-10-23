@@ -20,6 +20,9 @@ export function rowButton(onActivate: () => void): RowButtonProps {
     tabIndex: 0,
     onKeyDown: (e) => {
       if (e.key !== "Enter" && e.key !== " ") return;
+      // 行内还有真正的按钮/输入框（更多菜单、加入引用、重命名）。从它们冒泡上来
+      // 的按键不能被行抢走：preventDefault 会取消按钮自己的激活。
+      if (e.target !== e.currentTarget) return;
       // 空格默认会滚动页面，这里要拦掉。
       e.preventDefault();
       onActivate();

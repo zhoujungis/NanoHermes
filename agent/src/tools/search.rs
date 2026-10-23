@@ -188,38 +188,51 @@ fn path_matches(pattern: &str, rel: &str) -> bool {
     glob_match(pattern, name)
 }
 
+/// Bound on matcher work per call. Nested `**` groups are exponential in the
+/// worst case, and the pattern comes from the model — a crafted pattern must not
+/// hang the turn. Hitting the budget simply means "no match".
+const MAX_GLOB_STEPS: usize = 100_000;
+
 /// Glob matcher with `*` (within a path segment), `?` and `**` (across segments).
 pub fn glob_match(pattern: &str, path: &str) -> bool {
     let pats: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    match_segments(&pats, &segs)
+    let mut budget = MAX_GLOB_STEPS;
+    match_segments(&pats, &segs, &mut budget)
 }
 
-fn match_segments(pats: &[&str], segs: &[&str]) -> bool {
+fn match_segments(pats: &[&str], segs: &[&str], budget: &mut usize) -> bool {
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
     match pats.split_first() {
         None => segs.is_empty(),
         Some((&"**", rest)) => {
             // `**` may consume zero or more path segments.
-            (0..=segs.len()).any(|i| match_segments(rest, &segs[i..]))
+            (0..=segs.len()).any(|i| *budget > 0 && match_segments(rest, &segs[i..], budget))
         }
         Some((head, rest)) => match segs.split_first() {
             None => false,
             Some((seg, seg_rest)) => {
-                wildcard_match(head.as_bytes(), seg.as_bytes()) && match_segments(rest, seg_rest)
+                wildcard_match(head, seg) && match_segments(rest, seg_rest, budget)
             }
         },
     }
 }
 
-/// Classic wildcard match with backtracking for `*`.
-fn wildcard_match(pat: &[u8], s: &[u8]) -> bool {
+/// Classic wildcard match with backtracking for `*`. Works on characters, not
+/// bytes, so `?` matches one CJK character (three bytes) rather than failing.
+fn wildcard_match(pat: &str, s: &str) -> bool {
+    let pat: Vec<char> = pat.chars().collect();
+    let s: Vec<char> = s.chars().collect();
     let (mut p, mut i) = (0usize, 0usize);
     let mut star: Option<(usize, usize)> = None;
     while i < s.len() {
-        if p < pat.len() && (pat[p] == b'?' || pat[p] == s[i]) {
+        if p < pat.len() && (pat[p] == '?' || pat[p] == s[i]) {
             p += 1;
             i += 1;
-        } else if p < pat.len() && pat[p] == b'*' {
+        } else if p < pat.len() && pat[p] == '*' {
             star = Some((p, i));
             p += 1;
         } else if let Some((sp, si)) = star {
@@ -230,7 +243,7 @@ fn wildcard_match(pat: &[u8], s: &[u8]) -> bool {
             return false;
         }
     }
-    while p < pat.len() && pat[p] == b'*' {
+    while p < pat.len() && pat[p] == '*' {
         p += 1;
     }
     p == pat.len()
@@ -262,5 +275,18 @@ mod tests {
         assert!(glob_match("a?c.rs", "abc.rs"));
         assert!(!glob_match("a?c.rs", "abbc.rs"));
         assert!(glob_match("src/**/test?.rs", "src/x/y/test1.rs"));
+        // `?` is one character, so it matches a multi-byte CJK name.
+        assert!(glob_match("?.rs", "文.rs"));
+        assert!(!glob_match("??.rs", "文.rs"));
+    }
+
+    #[test]
+    fn pathological_double_star_terminates() {
+        // Nested `**` used to be exponential; the budget makes this return.
+        let pattern = "**/**/**/**/**/**/**/**/x";
+        let path = "a/b/c/d/e/f/g/h/i/j/k/l";
+        let start = std::time::Instant::now();
+        let _ = glob_match(pattern, path);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 }

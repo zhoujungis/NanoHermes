@@ -1,5 +1,12 @@
 import { appWindow } from "../lib/tauri";
-import { activeTask, isCloud, modelLabel, resolveModel, useAppState } from "../lib/store";
+import {
+  activeTask,
+  isCloud,
+  modelLabel,
+  resolveModel,
+  taskIsCloud,
+  useAppState,
+} from "../lib/store";
 import { BrandMark, Icon } from "./Icon";
 
 /** 顶栏：品牌、当前模型/工作区、面板开关、设置、窗口控制。 */
@@ -21,8 +28,9 @@ export function TitleBar({
   const win = appWindow();
   const task = activeTask();
 
-  // 未配置的提示要跟着默认执行位置走：默认云端时该看云服务地址，而不是本机 Key。
-  const cloud = isCloud(settings);
+  // 执行位置跟着当前任务走；没有任务时才退回设置里的默认位置。用默认值会让
+  // 一个本机任务显示「云端执行」、或反过来提示未配置 Key。
+  const cloud = task ? taskIsCloud(task) : isCloud(settings);
   // 本机任务用「它自己选的模型档案」，没有任务时才退回设置里的默认档案。
   const profile = resolveModel(settings, task?.model);
   const hasKey = !!(profile?.api_key || "").trim();
@@ -59,22 +67,32 @@ export function TitleBar({
       </div>
       <div className="fill" data-tauri-drag-region />
 
-      <div className="tb-chip" title={chipTitle} onClick={onOpenSettings}>
+      <button
+        type="button"
+        className="tb-chip"
+        title={chipTitle}
+        aria-label={`执行位置：${chipText}。打开设置`}
+        onClick={onOpenSettings}
+      >
         <span className={"dot" + (ready ? "" : " off")} />
         <span>{chipText}</span>
-      </div>
+      </button>
       <div className="tb-sep" />
 
       <button
+        type="button"
         className={"tbtn" + (showSidebar ? " on" : "")}
         title="任务栏（Ctrl+B）"
+        aria-pressed={showSidebar}
         onClick={onToggleSidebar}
       >
         <Icon name="panelLeft" />
       </button>
       <button
+        type="button"
         className={"tbtn" + (showAside ? " on" : "")}
         title="结果区（Ctrl+J）"
+        aria-pressed={showAside}
         onClick={onToggleAside}
       >
         <Icon name="panelRight" />

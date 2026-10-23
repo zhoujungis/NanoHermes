@@ -19,6 +19,11 @@ const KEEP_RECENT: usize = 10;
 /// How many sub-agents may run at the same time within one turn.
 const MAX_PARALLEL_SUBAGENTS: usize = 4;
 
+/// Bound on tool-call threads spawned at once. The model controls how many
+/// calls it returns; without a cap, one turn could spawn hundreds of OS threads
+/// (and hundreds of shell processes) simultaneously.
+const MAX_PARALLEL_TOOL_CALLS: usize = 8;
+
 /// Cumulative token usage across every model request in the session.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct UsageTotals {
@@ -249,7 +254,10 @@ impl Agent {
     /// mode and push it into both the config and the tool context, so that a
     /// runtime mode switch actually changes how tools gate themselves.
     fn rebuild_auto_approve(&mut self) {
-        let auto_approve = self.cfg.permission_mode.auto_approve(self.base_auto_approve);
+        let auto_approve = self
+            .cfg
+            .permission_mode
+            .auto_approve(self.base_auto_approve);
         let approval = self.cfg.permission_mode.approval(self.base_approval);
         self.cfg.auto_approve = auto_approve;
         self.cfg.approval_policy = approval;
@@ -347,7 +355,16 @@ impl Agent {
                 interrupted = true;
                 break;
             }
-            let turn = self.complete()?;
+            // Persist on a failed request too: the user message (and any tool
+            // exchanges from earlier iterations) must survive so that fixing
+            // the API key and retrying does not silently drop the turn.
+            let turn = match self.complete() {
+                Ok(turn) => turn,
+                Err(e) => {
+                    self.persist();
+                    return Err(e);
+                }
+            };
             self.usage.requests += 1;
             self.usage.prompt_tokens += turn.usage.prompt_tokens;
             self.usage.completion_tokens += turn.usage.completion_tokens;
@@ -356,7 +373,8 @@ impl Agent {
             // totals span every conversation. Sending increments lets any client
             // build a correct per-task total, and locally they add up to the same
             // number anyway.
-            self.style.usage(1, turn.usage.prompt_tokens, turn.usage.completion_tokens);
+            self.style
+                .usage(1, turn.usage.prompt_tokens, turn.usage.completion_tokens);
 
             if !turn.content.trim().is_empty() && !self.style.is_silent() {
                 println!(); // terminate the streamed text line (terminal only)
@@ -381,18 +399,20 @@ impl Agent {
                 // (`execute` takes `&self`, and `Agent` is `Sync`).
                 let this: &Agent = self;
                 std::thread::scope(|s| {
-                    let handles: Vec<_> = turn
-                        .tool_calls
-                        .iter()
-                        .map(|call| s.spawn(move || this.execute(call)))
-                        .collect();
-                    handles
-                        .into_iter()
-                        .map(|h| {
+                    let mut results = Vec::with_capacity(turn.tool_calls.len());
+                    // Run in bounded batches: keeps ordering, avoids a
+                    // model-controlled thread/process spike.
+                    for batch in turn.tool_calls.chunks(MAX_PARALLEL_TOOL_CALLS) {
+                        let handles: Vec<_> = batch
+                            .iter()
+                            .map(|call| s.spawn(move || this.execute(call)))
+                            .collect();
+                        results.extend(handles.into_iter().map(|h| {
                             h.join()
                                 .unwrap_or_else(|_| "ERROR: tool thread panicked".to_string())
-                        })
-                        .collect()
+                        }));
+                    }
+                    results
                 })
             };
 
@@ -412,7 +432,8 @@ impl Agent {
             // A GUI has no `/undo`, so it gets a plain description instead of the
             // REPL's hint.
             if self.style.is_silent() {
-                self.style.warn("已停止：当前步骤执行完毕，对话上下文已保留");
+                self.style
+                    .warn("已停止：当前步骤执行完毕，对话上下文已保留");
             } else {
                 self.style.warn(
                     "interrupted — the conversation was kept; type a new instruction or /undo to rewind",
@@ -506,6 +527,13 @@ impl Agent {
             list.extend(m.all_tools());
             list.extend(mcp_aux_tools());
         }
+        // Add the subagent delegation tool if any sub-agents are configured.
+        // It goes in before filtering so mode and allow/deny lists apply to it
+        // as well.
+        if !self.cfg.subagents.is_empty() {
+            list.push(subagent_tool_spec());
+            list.push(agent_list_tool_spec());
+        }
         // Drop any tool whose name is not permitted by the current config.
         list.retain(|t| {
             let name = t
@@ -515,11 +543,6 @@ impl Agent {
                 .unwrap_or("");
             self.cfg.check_tool(name).is_ok()
         });
-        // Add the subagent delegation tool if any sub-agents are configured.
-        if !self.cfg.subagents.is_empty() {
-            list.push(subagent_tool_spec());
-            list.push(agent_list_tool_spec());
-        }
         Value::Array(list)
     }
 
@@ -610,7 +633,14 @@ impl Agent {
         }
 
         match tools::dispatch(name, args, &self.ctx) {
-            Ok(s) => s,
+            Ok(s) => {
+                // The plan is worth showing live, but it must not go straight to
+                // stdout: `json` / `stream-json` output has to stay machine-readable.
+                if name == "todo_write" {
+                    self.style.note(&s);
+                }
+                s
+            }
             Err(e) => {
                 // Built-in tools don't know this name; try MCP servers.
                 if e.contains("unknown tool") {
@@ -846,10 +876,18 @@ fn summarize(name: &str, args: &str) -> String {
         "subagent" => "task",
         _ => "pattern",
     };
+    // Paths and URLs are fed back to the results panel as file locations, so a
+    // 100-byte cap would make long paths unresolvable (the "…" is sent back to
+    // the preview/diff commands). Keep commands short, but leave paths intact.
+    let limit = match name {
+        "read_file" | "write_file" | "edit_file" | "apply_patch" | "list_dir" | "git_status"
+        | "git_diff" | "git_log" | "web_fetch" => 512,
+        _ => 100,
+    };
     match v.get(key).and_then(|x| x.as_str()) {
         Some(s) => {
             let s = s.replace('\n', " ");
-            let mut end = s.len().min(100);
+            let mut end = s.len().min(limit);
             while end > 0 && !s.is_char_boundary(end) {
                 end -= 1;
             }
@@ -1137,11 +1175,32 @@ mod summary_tests {
         // 整个改动在产物列表里消失（apply_patch 就曾如此）。
         let args = r#"{"path":"src/main.rs","diff":"@@ -1 +1 @@"}"#;
         for name in ["read_file", "write_file", "edit_file", "apply_patch"] {
-            assert_eq!(summarize(name, args), "src/main.rs", "{name} 应给出文件路径");
+            assert_eq!(
+                summarize(name, args),
+                "src/main.rs",
+                "{name} 应给出文件路径"
+            );
         }
-        assert_eq!(summarize("run_command", r#"{"command":"ls -la"}"#), "ls -la");
+        assert_eq!(
+            summarize("run_command", r#"{"command":"ls -la"}"#),
+            "ls -la"
+        );
         // 参数不是 JSON 时给出空摘要，而不是一段误导性的文本。
         assert_eq!(summarize("apply_patch", "not json"), "");
+    }
+
+    #[test]
+    fn long_paths_are_preserved_for_the_results_panel() {
+        // >100 bytes: truncating this used to append "…" to the path that the
+        // results panel later sends back to preview/diff.
+        let long = format!("src/{}/file.rs", "深".repeat(60));
+        let args = serde_json::json!({ "path": long }).to_string();
+        assert_eq!(summarize("write_file", &args), long);
+
+        // Commands still get a short banner.
+        let cmd = format!("echo {}", "x".repeat(200));
+        let args = serde_json::json!({ "command": cmd }).to_string();
+        assert!(summarize("run_command", &args).ends_with('…'));
     }
 }
 
@@ -1210,7 +1269,10 @@ mod session_tests {
         };
         let agent = Agent::with_mcp(cfg, None);
         let sys = agent.messages[0]["content"].as_str().unwrap();
-        assert!(sys.starts_with("You are NanoHermes,"), "基底提示词仍要在最前");
+        assert!(
+            sys.starts_with("You are NanoHermes,"),
+            "基底提示词仍要在最前"
+        );
         assert!(sys.contains("回答一律用中文"), "新的人设要生效");
         assert!(!sys.contains("旧的系统提示词"), "旧提示词不能残留");
         assert_eq!(agent.messages[1]["content"], "hello", "对话历史必须保留");

@@ -255,6 +255,33 @@ describe("设置页键盘遍历（端到端）", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("radiogroup", { name: "权限模式" })).toBeNull();
   });
+
+  it("设置页打开时 Ctrl+F 不会在被遮住的对话区打开查找条", async () => {
+    const { App } = await freshApp();
+    render(<App />);
+
+    fireEvent.keyDown(window, { key: ",", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+
+    // 查找条若在设置页背后挂载并抢走焦点，用户会把内容输进看不见的输入框。
+    expect(screen.queryByPlaceholderText("在对话中查找")).toBeNull();
+  });
+});
+
+describe("侧栏就地重命名（端到端）", () => {
+  it("双击侧栏标题在行内编辑，不会跑到顶栏抢焦点", async () => {
+    const { App } = await freshApp();
+    render(<App />);
+
+    const title = document.querySelector(".task .t") as HTMLElement;
+    expect(title).toBeTruthy();
+    fireEvent.doubleClick(title);
+
+    // 输入框必须出现在被双击的那一行……
+    expect(document.querySelector(".task input.inline-input")).toBeTruthy();
+    // ……而不是顶栏（两处同时挂载会让焦点飞到另一个位置）。
+    expect(document.querySelector(".taskbar input.inline-input")).toBeNull();
+  });
 });
 
 describe("Composer 输入体验（端到端）", () => {

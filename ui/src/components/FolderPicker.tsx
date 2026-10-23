@@ -40,21 +40,31 @@ export function FolderPicker({ initial }: { initial: string }) {
   const [input, setInput] = useState(initial);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // 连续点目录时，只接受最后一次请求的结果，避免慢响应把路径框改回旧目录。
+  const seq = useRef(0);
 
   const go = (path: string) => {
+    const mine = ++seq.current;
     setError(null);
     setListing(null);
     invoke<Listing>("list_dirs", { path: path.trim() || null })
       .then((l) => {
+        if (mine !== seq.current) return;
         setListing(l);
         setInput(l.path);
       })
-      .catch((e) => setError(errText(e)));
+      .catch((e) => {
+        if (mine !== seq.current) return;
+        setError(errText(e));
+      });
   };
 
   useEffect(() => {
     go(initial);
     inputRef.current?.focus();
+    return () => {
+      seq.current++;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initial]);
 

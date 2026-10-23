@@ -289,4 +289,20 @@ describe("人设、片段与高级参数", () => {
     fireEvent.change(nums[0], { target: { value: "5" } });
     expect((m.autosaveSettings.mock.calls.at(-1)?.[0] as Settings).temperature).toBe(2);
   });
+
+  it("清空数字输入框不会把最小值写进配置", () => {
+    render(<SettingsPage onClose={() => {}} />);
+    const nums = screen.getAllByRole("spinbutton");
+    const before = m.autosaveSettings.mock.calls.length;
+
+    // 清空后应保持空白，让用户重新输入；以前 Number("") === 0 会立刻夹成 1。
+    fireEvent.change(nums[2], { target: { value: "" } });
+    expect((nums[2] as HTMLInputElement).value).toBe("");
+    expect(m.autosaveSettings.mock.calls.length).toBe(before);
+
+    // 失焦时还原成上一次生效的值，并兜底落盘。
+    fireEvent.blur(nums[2]);
+    expect((nums[2] as HTMLInputElement).value).toBe("4096");
+    expect(m.flushSettings).toHaveBeenCalled();
+  });
 });

@@ -264,6 +264,7 @@ export function Composer({
             ref={ta}
             rows={1}
             spellCheck={false}
+            aria-label="输入任务"
             value={st.prompt}
             placeholder="描述一个任务，例如：为 src/tools/search.rs 补充单元测试"
             onChange={(e) => {
@@ -432,7 +433,9 @@ export function Composer({
             <span className="hint">
               {st.busy ? "Enter 加入队列" : "Enter 发送"} · Shift+Enter 换行
             </span>
-            {st.busy && !cloud && (
+            {/* 运行中，发送键原地变成停止键（同一个 30px 位置）。两个按钮同时出现
+                会把底栏撑出输入框，窄面板下尤其明显。 */}
+            {st.busy ? (
               <button
                 className={"send stop" + (st.stopping ? " waiting" : "")}
                 title={
@@ -445,15 +448,16 @@ export function Composer({
               >
                 {st.stopping ? <div className="spin" /> : <Icon name="square" />}
               </button>
+            ) : (
+              <button
+                className="send"
+                title="发送"
+                disabled={!st.prompt.trim() && st.attachments.length === 0}
+                onClick={() => void send()}
+              >
+                <Icon name="arrowUp" />
+              </button>
             )}
-            <button
-              className="send"
-              title={st.busy ? "加入队列，本轮结束后自动发送" : "发送"}
-              disabled={!st.prompt.trim() && st.attachments.length === 0}
-              onClick={() => void send()}
-            >
-              <Icon name="arrowUp" />
-            </button>
           </div>
         </div>
       </div>

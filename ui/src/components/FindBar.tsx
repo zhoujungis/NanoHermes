@@ -28,6 +28,19 @@ export function FindBar({
 }) {
   const input = useRef<HTMLInputElement>(null);
 
+  // 关闭查找后把焦点还给打开前的元素（通常是输入框），键盘用户不必从头 Tab。
+  useEffect(() => {
+    if (!open) return;
+    const prev = document.activeElement as HTMLElement | null;
+    return () => {
+      const active = document.activeElement;
+      // 只有焦点还在查找条里（或已丢失）时才还原，避免抢回用户刚点的别处。
+      if (!active || active === document.body || active.closest(".find")) {
+        prev?.focus?.();
+      }
+    };
+  }, [open]);
+
   // 打开或再次按 Ctrl+F 时把焦点交给输入框，并选中已有查询便于整体替换。
   useEffect(() => {
     if (!open) return;

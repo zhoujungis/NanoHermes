@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { rowButton } from "../lib/a11y";
 import {
   activeTask,
@@ -66,8 +66,11 @@ export function FileTree() {
   const [files, setFiles] = useState<string[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [open, setOpen] = useState<Set<string>>(new Set());
+  // 切换工作区时，旧工作区较慢的响应不能覆盖新列表。
+  const seq = useRef(0);
 
   const load = useCallback(() => {
+    const mine = ++seq.current;
     if (cloud) return;
     if (!ws) {
       setFiles([]);
@@ -77,11 +80,13 @@ export function FileTree() {
     setErr(null);
     invoke<string[]>("list_workspace_files")
       .then((r) => {
+        if (mine !== seq.current) return;
         setFiles(r);
         // 默认展开第一层目录，既能看到结构又不至于一次铺开几千行。
         setOpen(new Set(buildTree(r).filter((n) => n.dir).map((n) => n.path)));
       })
       .catch((e) => {
+        if (mine !== seq.current) return;
         setFiles([]);
         setErr(errText(e));
       });
@@ -89,6 +94,9 @@ export function FileTree() {
 
   useEffect(() => {
     load();
+    return () => {
+      seq.current++;
+    };
   }, [load]);
 
   const tree = useMemo(() => buildTree(files || []), [files]);

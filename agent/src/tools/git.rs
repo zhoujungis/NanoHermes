@@ -26,7 +26,14 @@ pub fn git_status(args: &Value, ctx: &Ctx) -> Result<String, String> {
 
 /// `git_diff` — unstaged changes, or staged changes when `staged` is true.
 pub fn git_diff(args: &Value, ctx: &Ctx) -> Result<String, String> {
-    let mut a = vec!["diff".into()];
+    // `diff.external` / textconv drivers come from the repo config and can run
+    // commands; the model should only see the plain diff.
+    let mut a = vec![
+        "diff".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+        "--no-color".into(),
+    ];
     if args
         .get("staged")
         .and_then(|v| v.as_bool())
@@ -125,7 +132,16 @@ fn path_arg(args: &Value) -> Option<String> {
 /// Run `git` with `args` in `root`, returning combined output on success and a
 /// descriptive error (including git's own message) on failure.
 fn run_git(root: &Path, args: &[String]) -> Result<String, String> {
+    // A git call on a huge repo or a stale network mount can block forever;
+    // the tool runs on a turn thread, so bound it like `run_command` does.
+    const GIT_TIMEOUT_SECS: u64 = 60;
     let mut child = Command::new("git")
+        // Neutralise repo-controlled config that can execute commands.
+        .arg("-c")
+        .arg("core.fsmonitor=false")
+        .arg("-c")
+        .arg("diff.external=")
+        .arg("--no-pager")
         .args(args)
         .current_dir(root)
         .stdin(Stdio::null())
@@ -139,11 +155,32 @@ fn run_git(root: &Path, args: &[String]) -> Result<String, String> {
     let out_thread = std::thread::spawn(move || shell::read_capped(out_pipe));
     let err_thread = std::thread::spawn(move || shell::read_capped(err_pipe));
 
-    let status = child
-        .wait()
-        .map_err(|e| format!("failed to wait for git: {e}"))?;
+    let start = std::time::Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if start.elapsed() >= std::time::Duration::from_secs(GIT_TIMEOUT_SECS) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(format!("failed to wait for git: {e}")),
+        }
+    };
     let (out, _) = out_thread.join().unwrap_or_default();
     let (err, _) = err_thread.join().unwrap_or_default();
+    if timed_out {
+        return Err(format!(
+            "git {:?} timed out after {GIT_TIMEOUT_SECS}s and was killed",
+            args.first().map(String::as_str).unwrap_or("")
+        ));
+    }
+    let status = status.expect("status present unless timed out");
     let stdout = String::from_utf8_lossy(&out).trim().to_string();
     let stderr = String::from_utf8_lossy(&err).trim().to_string();
 

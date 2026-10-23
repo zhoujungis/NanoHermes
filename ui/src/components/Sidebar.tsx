@@ -149,7 +149,7 @@ export function Sidebar({
                 >
                   <InlineEdit
                     value={t.title || "新任务"}
-                    editing={editingId === t.id && st.activeId !== t.id}
+                    editing={editingId === t.id}
                     onStart={() => onEdit(t.id)}
                     onDone={(v) => {
                       renameTask(t.id, v);

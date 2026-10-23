@@ -74,16 +74,29 @@ fn is_env_assignment(token: &str) -> bool {
 }
 
 fn git_subcommand_is_read_only<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> bool {
-    // Global git flags that consume the following token as their value.
-    const VALUE_FLAGS: &[&str] = &["-C", "-c", "--git-dir", "--work-tree", "--namespace"];
     let mut pending_value = false;
     for token in tokens {
         if pending_value {
             pending_value = false;
             continue;
         }
+        // `-c`/`--config-env` can execute commands through core.fsmonitor/pager;
+        // `--git-dir`/`--work-tree` point at a repo whose config does the same;
+        // `-p`/`--paginate` run the configured pager. None of them are read-only.
+        if token == "-c"
+            || token == "-p"
+            || token == "--paginate"
+            || token.starts_with("--config-env")
+            || token.starts_with("--git-dir")
+            || token.starts_with("--work-tree")
+            || token.starts_with("--namespace")
+        {
+            return false;
+        }
         if token.starts_with('-') {
-            if VALUE_FLAGS.contains(&token) {
+            // `-C <dir>` only changes the working directory; the repo config is
+            // read anyway when git runs there.
+            if token == "-C" {
                 pending_value = true;
             }
             continue;
@@ -112,19 +125,19 @@ const TRUSTED_BINARIES: &[&str] = &[
     "which",
     "whereis",
     "printenv",
-    "sort",
+    // `sort` is intentionally absent: `sort -o FILE` writes a file.
     "uniq",
     "cut",
     "tr",
     "nl",
     "du",
     "df",
-    "date",
+    // `date` is absent: `date -s` sets the system clock.
     "whoami",
     "id",
     "uname",
     "hostname",
-    "tree",
+    // `tree` is absent: `tree -o FILE` writes a file.
     "jq",
     "true",
     "false",
@@ -141,7 +154,7 @@ const TRUSTED_BINARIES: &[&str] = &[
     "cmp",
     "seq",
     "strings",
-    "xxd",
+    // `xxd` is absent: `xxd -r` writes a file.
     "od",
     "hexdump",
     "column",
@@ -485,6 +498,17 @@ mod tests {
         assert!(!is_trusted_command("ls && rm"));
         assert!(!is_trusted_command("$(rm x)"));
         assert!(!is_trusted_command(""));
+        // Config/pager flags can execute commands through a hostile repo.
+        assert!(!is_trusted_command(
+            "git -c core.fsmonitor='sh -c \"id\"' status"
+        ));
+        assert!(!is_trusted_command("git --git-dir /tmp/x/.git status"));
+        assert!(!is_trusted_command("git -p status"));
+        // Write-capable "read-only" tools must not be auto-approved.
+        assert!(!is_trusted_command("sort -o out in"));
+        assert!(!is_trusted_command("tree -o out"));
+        assert!(!is_trusted_command("xxd -r in out"));
+        assert!(!is_trusted_command("date -s 2020-01-01"));
     }
 
     #[test]

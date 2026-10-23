@@ -56,6 +56,12 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   const [temperature, setTemperature] = useState(st.settings?.temperature ?? 0);
   const [maxIterations, setMaxIterations] = useState(st.settings?.max_iterations ?? 40);
   const [maxTokens, setMaxTokens] = useState(st.settings?.max_tokens ?? 4096);
+  // 三个数字输入框的显示草稿；真正的数值仍保存在上面的数字 state 里。
+  const [numberDraft, setNumberDraft] = useState({
+    temperature: String(st.settings?.temperature ?? 0),
+    max_iterations: String(st.settings?.max_iterations ?? 40),
+    max_tokens: String(st.settings?.max_tokens ?? 4096),
+  });
   const [probe, setProbe] = useState<{ t: string; ok: boolean } | null>(null);
   const [testing, setTesting] = useState(false);
   // 每个模型档案各测各的连通性（键就是档案 id），互不覆盖。
@@ -217,25 +223,35 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   };
 
   const setNumber = (key: "temperature" | "max_iterations" | "max_tokens", raw: string): void => {
+    // 输入框用字符串草稿，才能先清空再重新输入。直接 `value={number}` 时，
+    // 清空会先变成 `Number("") === 0`，被 clamp 成 0 / 1 又弹回来，光标也跟着跳。
+    setNumberDraft((d) => ({ ...d, [key]: raw }));
+    if (raw.trim() === "") return;
     const v = Number(raw);
-    if (Number.isFinite(v)) {
-      if (key === "temperature") {
-        const t = Math.min(2, Math.max(0, v));
-        setTemperature(t);
-        change({ temperature: t });
-      } else if (key === "max_iterations") {
-        const n = Math.min(200, Math.max(1, Math.round(v)));
-        setMaxIterations(n);
-        change({ max_iterations: n });
-      } else {
-        const n = Math.min(200000, Math.max(1, Math.round(v)));
-        setMaxTokens(n);
-        change({ max_tokens: n });
-      }
-    } else if (raw.trim() === "") {
-      // 清空输入框时保持上一次的值，失焦再兜底落盘。
-      void flushSettings();
+    if (!Number.isFinite(v)) return;
+    if (key === "temperature") {
+      const t = Math.min(2, Math.max(0, v));
+      setTemperature(t);
+      change({ temperature: t });
+    } else if (key === "max_iterations") {
+      const n = Math.min(200, Math.max(1, Math.round(v)));
+      setMaxIterations(n);
+      change({ max_iterations: n });
+    } else {
+      const n = Math.min(200000, Math.max(1, Math.round(v)));
+      setMaxTokens(n);
+      change({ max_tokens: n });
     }
+  };
+
+  /** 失焦时把空草稿还原成上一次生效的值，避免输入框一直空着。 */
+  const settleNumber = (key: "temperature" | "max_iterations" | "max_tokens"): void => {
+    if (!numberDraft[key].trim()) {
+      const committed =
+        key === "temperature" ? temperature : key === "max_iterations" ? maxIterations : maxTokens;
+      setNumberDraft((d) => ({ ...d, [key]: String(committed) }));
+    }
+    void flushSettings();
   };
 
   const testCloud = async () => {
@@ -754,9 +770,9 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                     min={0}
                     max={2}
                     step={0.1}
-                    value={temperature}
+                    value={numberDraft.temperature}
                     onChange={(e) => setNumber("temperature", e.target.value)}
-                    onBlur={() => void flushSettings()}
+                    onBlur={() => settleNumber("temperature")}
                   />
                   <div className="hintline">0 更稳定，越大越发散。</div>
                 </div>
@@ -766,9 +782,9 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                     type="number"
                     min={1}
                     max={200}
-                    value={maxIterations}
+                    value={numberDraft.max_iterations}
                     onChange={(e) => setNumber("max_iterations", e.target.value)}
-                    onBlur={() => void flushSettings()}
+                    onBlur={() => settleNumber("max_iterations")}
                   />
                   <div className="hintline">一轮里模型与工具往返的上限。</div>
                 </div>
@@ -778,9 +794,9 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                     type="number"
                     min={1}
                     max={200000}
-                    value={maxTokens}
+                    value={numberDraft.max_tokens}
                     onChange={(e) => setNumber("max_tokens", e.target.value)}
-                    onBlur={() => void flushSettings()}
+                    onBlur={() => settleNumber("max_tokens")}
                   />
                   <div className="hintline">单次回复允许生成的上限。</div>
                 </div>

@@ -28,4 +28,19 @@ describe("rowButton", () => {
     // 空格会滚动页面，必须先拦截再触发
     expect(log).toEqual(["prevent", "go", "prevent", "go"]);
   });
+
+  it("行内按钮冒泡上来的 Enter 不被整行抢走", () => {
+    const log: string[] = [];
+    const props = rowButton(() => log.push("go"));
+    const fromNested = {
+      key: "Enter",
+      preventDefault: () => log.push("prevent"),
+      target: { tagName: "BUTTON" },
+      currentTarget: { tagName: "DIV" },
+    } as unknown as KeyboardEvent;
+
+    props.onKeyDown(fromNested);
+    // 既不触发切任务，也不 preventDefault（否则按钮自己不会激活）。
+    expect(log).toEqual([]);
+  });
 });

@@ -11,7 +11,7 @@ The design goal is a small binary (~2 MB) with minimal runtime memory: no async 
 - **Themes** — three palettes (Graphite, Midnight, Paper) plus follow-the-system, switchable from settings or `Ctrl+K`; every colour in the UI comes from CSS variables, so a theme is a single palette swap.
 - **OpenAI-compatible API** — works with OpenAI, local models (Ollama, vLLM, llamafile), or any endpoint that speaks the chat-completions format.
 - **Streaming** — assistant tokens are printed as they arrive.
-- **Resilience** — transient API failures (HTTP 429/5xx) are retried with exponential backoff; an optional `--fallback-model` takes over when retries are exhausted.
+- **Resilience** — transient API failures (HTTP 429/5xx) are retried with exponential backoff; an optional `--fallback-model` takes over when retries are exhausted. Once streamed text has reached the user the request is never retried, so an answer is never duplicated.
 - **Built-in tools** — `read_file`, `write_file`, `edit_file`, `apply_patch`, `list_dir`, `grep`, `glob`, `run_command`, `web_fetch`, `web_search`, `todo_write`, `todo_read`, `git_status`, `git_diff`, `git_log`, `git_commit`, `task_output`, `task_list`, `task_kill`. Conditional tools: `skill` (when skills are discovered), `subagent` / `agent_list` (when sub-agents are configured), `memory_save` / `memory_search` (when long-term memory is enabled).
 - **Planning** — `todo_write` / `todo_read` let the model lay out and track a task list across turns.
 - **Git** — `git_status` / `git_diff` / `git_log` inspect the repo; `git_commit` stages (optionally) and commits, with user confirmation.
@@ -20,13 +20,13 @@ The design goal is a small binary (~2 MB) with minimal runtime memory: no async 
 - **MCP support** — connect to external MCP servers over stdio or streamable HTTP; their tools are auto-discovered and callable.
 - **MCP resources & prompts** — browse and read MCP resources, list and render MCP prompts through dedicated agent tools.
 - **Project guidance** — `AGENTS.md` files (global `~/.nanohermes/AGENTS.md` plus every ancestor of the workspace) are loaded into the system prompt as project rules (capped at 20 KB, deduplicated).
-- **Long-term memory** — after a completed turn the agent distils lessons, preferences, corrections and facts into `~/.nanohermes/memory.json`; the next turn retrieves the relevant entries and injects them into the system prompt. Ranking is local BM25 over ASCII words and CJK bigrams, so it needs no extra service, and the model can also read and write memory with `memory_save` / `memory_search`.
+- **Long-term memory** — after a completed turn the agent distils lessons, preferences, corrections and facts into `~/.nanohermes/memory.json`; the next turn retrieves the relevant entries and injects them into the system prompt. Ranking is local BM25 over ASCII words plus CJK unigrams and bigrams, so it needs no extra service, and the model can also read and write memory with `memory_save` / `memory_search`.
 - **Skills** — reusable instruction bundles discovered from `.nanohermes/skills/<name>/SKILL.md`. Only the name and description enter the system prompt; the model loads the full instructions on demand with the `skill` tool (progressive disclosure).
 - **Lifecycle hooks** — `PreToolUse` / `PostToolUse` shell hooks defined in the config file. A `PreToolUse` hook can veto a tool call; a `PostToolUse` hook can only append a warning.
 - **Sub-agents** — delegate focused sub-tasks to configured sub-agents that run in parallel (bounded concurrency), tracked on a job board and inspectable with `agent_list`.
-- **Sandboxing & approvals** — a Linux Landlock filesystem sandbox (`read-only` / `workspace-write`) for spawned commands, plus a three-level approval policy (`never` / `on-request` / `untrusted`) with built-in detection of recognised read-only commands.
-- **Parallel tool calls** — when the model returns multiple tool calls in one turn, they execute concurrently.
-- **Session persistence** — save and restore conversation history to a JSON file with `--session`.
+- **Sandboxing & approvals** — a `read-only` / `workspace-write` filesystem sandbox enforced by every file-writing tool, plus a Linux Landlock sandbox for spawned commands, and a three-level approval policy (`never` / `on-request` / `untrusted`) with built-in detection of recognised read-only commands.
+- **Parallel tool calls** — when the model returns multiple tool calls in one turn, they execute concurrently (at most 8 at a time).
+- **Session persistence** — save and restore conversation history to a JSON file with `--session`, or resume the most recent session for the current directory with `-c` / pick one interactively with `-r`.
 - **Multimodal input** — attach images with `--image` (one-shot) or `/image` (REPL) for vision-capable models.
 - **Context compaction** — when the conversation grows beyond the budget, older messages are summarized (via the model) rather than silently dropped.
 - **Interrupt & rewind** — Ctrl-C aborts the running turn without killing the process (the conversation is kept); `/undo [n]` rewinds one or more full user turns.
@@ -96,7 +96,7 @@ cd gui && npx --no-install tauri build   # release build + installers
 
 - Every task owns its conversation and its own folder. A local task binds to a workspace folder picked in the folder dialog (or typed directly); relative paths in every tool call resolve against it.
 - Execution location is per task: `local` runs the agent inside the app, `cloud` forwards the turn to a remote daemon (see [HTTP daemon mode](#http-daemon-mode)) and tags it with `X-Session-Id`, so each task keeps its own conversation on the server.
-- A local task can be stopped at the next step boundary; a cloud turn cannot be cancelled, because the daemon holds the whole request.
+- A local task can be stopped at the next step boundary; a cloud turn stops when the daemon emits its next stream event, because the daemon holds the whole request.
 - Pinned tasks form their own group fixed at the top of the list and skip the Today/Yesterday/This-week buckets; toggle the pin from the task menu or `Ctrl+K`.
 
 ### Permission modes
@@ -107,7 +107,7 @@ cd gui && npx --no-install tauri build   # release build + installers
 | `accept-edits` | Accept | File edits auto-approved, commands gated. |
 | `plan` | Plan | Read-only: no writes, no commands. |
 | `goal` | Goal | Unattended: every tool runs until the task is finished. |
-| `debug` | Debug | Reads files and runs commands to reproduce a problem, but never writes. |
+| `debug` | Debug | Reads files and runs commands to reproduce a problem; the file-editing tools are blocked, but shell commands can still modify the tree (combine with `--sandbox read-only` for a hard guarantee). |
 
 The mode is stored in settings as the default for new tasks and can be switched from the composer or the command palette. This applies to local tasks only: a cloud turn uses the permission mode the daemon was started with (see [Deploying the daemon on a VPS](#deploying-the-daemon-on-a-vps)).
 
@@ -117,7 +117,8 @@ The mode is stored in settings as the default for new tasks and can be switched 
 - `↑` / `↓` walk the input history while the caret sits on the first / last line; the draft you were typing is restored when you come back to the newest entry.
 - `@` opens the workspace file picker and inserts the chosen path at the caret.
 - `+` opens the workspace file picker; the files you select are inlined into the prompt.
-- While a turn is running the send button becomes **Stop**. A stop request takes effect at the next step boundary: the button spins and stays disabled, the task bar switches to `Stopping`, and when the turn winds down you get a "task stopped" notice and the caret returns to the input. Pressing `Enter` mid-turn is not dropped silently — it tells you to finish or stop first.
+- While a turn is running the send button becomes **Stop**. A stop request takes effect at the next step boundary (for a cloud task, when the daemon emits its next stream event): the button spins and stays disabled, the task bar switches to `Stopping`, and when the turn winds down you get a "task stopped" notice and the caret returns to the input.
+- Pressing `Enter` mid-turn queues the message instead of dropping it. The queue is sent automatically when the turn ends normally; after a stop it stays queued so you can review or send it yourself.
 - The model pill left of the mode switch picks which model profile this task talks to. Each task remembers its own choice; the menu is fed by the list in **Settings → Models**.
 - The persona pill next to it picks which persona (system-prompt add-on) this task uses; a persona with actual instructions is highlighted. The menu is fed by **Settings → Personas**.
 - The bolt button opens the **prompt snippets** menu: clicking one appends its text to the current input. Snippets are maintained in **Settings → Prompt snippets**.
@@ -191,13 +192,40 @@ agent --base-url http://localhost:11434/v1 -m llama3 "list files"
 
 ## Configuration
 
-NanoHermes is configured through environment variables and CLI flags. CLI flags take precedence.
+NanoHermes is configured through a config file, environment variables and CLI flags. Precedence: **CLI flags > config file > environment variables**.
 
 | Variable | Equivalent flag | Default | Description |
 |----------|----------------|---------|-------------|
 | `NANOHERMES_API_KEY` / `OPENAI_API_KEY` | `-k, --api-key` | _(empty)_ | API key for the endpoint |
 | `NANOHERMES_BASE_URL` / `OPENAI_BASE_URL` | `-u, --base-url` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
 | `NANOHERMES_MODEL` / `OPENAI_MODEL` | `-m, --model` | `gpt-4o-mini` | Model name |
+| `NANOHERMES_CONFIG` | `--config` | `~/.nanohermes/config.json` | Config file to load when `--config` is absent |
+| `NANOHERMES_DAEMON_TOKEN` | `--daemon-token` | _(empty)_ | Bearer token for daemon requests |
+| `NANOHERMES_MAX_RETRIES` | `--max-retries` | `2` | Transient-failure retries |
+| `NANOHERMES_RETRY_BASE_MS` | `--retry-base-ms` | `500` | Base backoff between retries |
+
+### Config file
+
+Besides environment variables and flags, NanoHermes reads a JSON config file. `~/.nanohermes/config.json` is loaded automatically when it exists; `--config <FILE>` (or `NANOHERMES_CONFIG`) loads a different file. Environment variables are read first, then the file, then CLI flags — so the file overrides env vars and flags override the file. `--print-config` prints the resolved result and exits.
+
+```json
+{
+  "base_url": "https://openrouter.ai/api/v1",
+  "model": "anthropic/claude-sonnet-4",
+  "permission_mode": "accept-edits",
+  "approval_policy": "on-request",
+  "sandbox": "workspace-write",
+  "thinking": true,
+  "project_docs": true,
+  "memory": true,
+  "allowed_tools": ["read_file", "grep", "edit_file"],
+  "hooks": [
+    { "event": "PreToolUse", "matcher": "run_command", "command": "./scripts/check.sh" }
+  ]
+}
+```
+
+Supported keys: `api_key`, `base_url`, `model`, `temperature`, `max_tokens`, `stream`, `max_iterations`, `cwd`, `auto_approve`, `approval_policy`, `sandbox`, `timeout_secs`, `max_retries`, `retry_base_ms`, `mcp_config`, `session`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `fallback_model`, `output_format`, `input_format`, `continue_session`, `resume_session`, `thinking`, `project_docs`, `memory`, `memory_dir`, `system_prompt`, `daemon`, `daemon_port`, `daemon_bind`, `daemon_token`, `subagents_config`, and `hooks`.
 
 ### CLI flags
 
@@ -210,6 +238,7 @@ echo "PROMPT" | agent [OPTIONS]  one-shot with the prompt on stdin
 | Flag | Description |
 |------|-------------|
 | `-m, --model <NAME>` | Model name |
+| `--fallback-model <NAME>` | Model to retry with when the primary model keeps failing (retries exhausted) |
 | `-u, --base-url <URL>` | OpenAI-compatible base URL (without `/chat/completions`) |
 | `-k, --api-key <KEY>` | API key |
 | `-C, --cwd <DIR>` | Workspace root (default: current directory) |
@@ -217,6 +246,8 @@ echo "PROMPT" | agent [OPTIONS]  one-shot with the prompt on stdin
 | `--mcp-config <FILE>` | Path to an MCP servers config JSON (enables MCP tools) |
 | `--subagents <FILE>` | Path to a sub-agents config JSON (enables the `subagent` / `agent_list` tools) |
 | `--session <FILE>` | Persist conversation history to FILE (loaded on startup if present) |
+| `-c, --continue` | Resume the most recent session recorded for this workspace |
+| `-r, --resume` | List saved sessions and pick one to resume |
 | `-n, --max-iterations <N>` | Max model↔tool round trips per turn (default 40) |
 | `--max-tokens <N>` | Max response tokens (default 4096) |
 | `--temperature <F>` | Sampling temperature (default 0.0) |
@@ -224,10 +255,19 @@ echo "PROMPT" | agent [OPTIONS]  one-shot with the prompt on stdin
 | `--max-retries <N>` | Retries for transient API failures (default 2, env `NANOHERMES_MAX_RETRIES`) |
 | `--retry-base-ms <MS>` | Base backoff delay between retries (default 500, env `NANOHERMES_RETRY_BASE_MS`) |
 | `--no-stream` | Disable streaming (buffered response) |
+| `--output-format <FMT>` | `text` (default), `json` (one JSON object on stdout) or `stream-json` (newline-delimited events) |
+| `--input-format <FMT>` | `text` (default) or `stream-json` (parse stdin as JSON lines) |
+| `--thinking` | Ask the endpoint for extended thinking (`reasoning_effort: high`) |
 | `--ask` | Confirm every shell command before running (`untrusted` policy) |
 | `--approval-policy <POLICY>` | When shell commands are confirmed: `never` \| `on-request` \| `untrusted` (default `never`, i.e. auto-approve) |
-| `--sandbox <MODE>` | Filesystem sandbox for spawned commands: `off` \| `read-only` \| `workspace-write` (Linux/Landlock) |
 | `-y, --yes` | Auto-approve shell commands (`never` policy; default) |
+| `--sandbox <MODE>` | Filesystem sandbox: `off` (default) \| `read-only` \| `workspace-write`. File tools enforce it everywhere; spawned commands use Landlock on Linux |
+| `--permission-mode <MODE>` | `default` \| `accept-edits` \| `plan` \| `goal` \| `debug` (see [Permission modes](#permission-modes)) |
+| `--allowed-tools <LIST>` | Comma-separated allow-list of tool names |
+| `--disallowed-tools <LIST>` | Comma-separated deny-list of tool names; `*` denies every tool, including MCP and memory tools |
+| `--mode <MODE>` | Preset bundle: `minimal` (no tools) \| `create` (file tools only, no shell) |
+| `--config <FILE>` | Load settings from a JSON config file instead of `~/.nanohermes/config.json` |
+| `--print-config` | Print the resolved configuration as JSON and exit |
 | `--no-project-docs` | Do not load `AGENTS.md` into the system prompt |
 | `--daemon` | Run as an HTTP daemon: `POST {"prompt":"..."}` → `{"response":"..."}` |
 | `--daemon-port <PORT>` | Daemon listen port (default 8787) |
@@ -247,7 +287,7 @@ When running interactively:
 | `/clear` | Reset the conversation (keeps the system prompt) |
 | `/undo [n]` | Rewind the last `n` full user turns (default 1) |
 | `/model <name>` | Switch the active model |
-| `/mode <mode>` | Switch permission mode (`default`, `accept-edits`, `plan`) |
+| `/mode <mode>` | Switch permission mode (`default`, `accept-edits`, `plan`, `goal`, `debug`) |
 | `/format <fmt>` | Switch output format (`text`, `json`, `stream-json`) |
 | `/tools` | List available tools |
 | `/status` | Show session stats |
@@ -264,7 +304,7 @@ Anything else is sent to the agent as a task. Prefix a line with `!` to run a sh
 
 ## Built-in tools
 
-All paths are resolved relative to the workspace root unless absolute.
+All paths are resolved relative to the workspace root unless absolute. When a sandbox is configured, the file-writing tools (`write_file`, `edit_file`, `apply_patch`) enforce it: `read-only` rejects writes and `workspace-write` rejects paths outside the workspace.
 
 ### `read_file`
 Read a text file with line numbers.
@@ -325,7 +365,7 @@ Search file contents for a literal substring, recursively. Binary files and buil
 Results are capped at 200 matches.
 
 ### `glob`
-Find files by glob pattern relative to the workspace root. Supports `*`, `?`, and `**`.
+Find files by glob pattern relative to the workspace root. Supports `*`, `?`, and `**`. Matching is per character, so `?` matches one CJK character; pathological patterns (many nested `**`) are bounded by a work budget instead of hanging.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -352,7 +392,7 @@ Fetch a URL over HTTP(S) and return its content as readable plain text. HTML tag
 | `url` | string | _(required)_ | `http://` or `https://` URL |
 | `max_chars` | integer | 20000 | Maximum characters of text to return (500–200000) |
 
-Response bodies are capped at 2 MB; anything larger is truncated.
+Response bodies are capped at 2 MB; anything larger is truncated. Loopback, private, link-local and cloud-metadata addresses are refused, and every redirect hop is re-checked, so a prompt-injected page cannot turn the tool into an SSRF probe of the host or the local network.
 
 ### `web_search`
 Search the web (DuckDuckGo HTML endpoint) and return the top results as title / URL / snippet. Follow up with `web_fetch` on a result URL to read the page.
@@ -363,7 +403,7 @@ Search the web (DuckDuckGo HTML endpoint) and return the top results as title / 
 | `count` | integer | 5 | Number of results (1–10) |
 
 ### `todo_write` / `todo_read`
-Maintain an ordered task list for the current session. `todo_write` replaces the whole list (and echoes it to the terminal) so the model can lay out a plan and update progress; `todo_read` returns the current list.
+Maintain an ordered task list for the current session. `todo_write` replaces the whole list and reports it as a status note (stderr in the terminal, a `Note` event in the GUI) so the model can lay out a plan and update progress without polluting `json` output; `todo_read` returns the current list.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -446,10 +486,11 @@ These are only available when at least one MCP server is configured.
 
 ## Parallel tool calls
 
-When the model returns multiple `tool_calls` in a single assistant message, NanoHermes executes them **concurrently** using scoped threads. Results are collected in call order and appended together, so each `tool_call_id` is paired with the correct result regardless of which call finished first.
+When the model returns multiple `tool_calls` in a single assistant message, NanoHermes executes them **concurrently** using scoped threads, in batches of at most 8. Results are collected in call order and appended together, so each `tool_call_id` is paired with the correct result regardless of which call finished first.
 
 - Built-in tools run in parallel (they share no mutable state).
 - MCP tool calls serialize per-server (on the server's stdin lock) but run in parallel across different servers.
+- Calls beyond the first 8 run in the next batch, so one turn cannot spawn hundreds of OS threads and shell processes at once.
 - A single tool call takes the direct path with no thread overhead.
 
 ## Project guidance (AGENTS.md)
@@ -545,6 +586,8 @@ Read-only detection recognises a small set of safe programs (`ls`, `cat`, `grep`
 | `read-only` | Read + execute anywhere; no writes at all |
 | `workspace-write` | Read + execute anywhere; writes allowed only under the workspace |
 
+The file-writing tools (`write_file`, `edit_file`, `apply_patch`) honour the same mode on every platform: `read-only` rejects writes and `workspace-write` rejects paths that resolve outside the workspace, so the agent cannot bypass the sandbox by editing a file instead of running a command.
+
 The sandbox is installed in the child process after `fork` and before `exec`, so it also covers everything the command spawns. If the kernel does not expose Landlock, NanoHermes **refuses** to run the command rather than silently downgrading. It uses raw syscalls only — no external crates.
 
 ## Interrupt & rewind
@@ -565,10 +608,12 @@ agent --daemon --daemon-port 8787 \
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/` | `POST` | Bearer token (if set) | Body `{"prompt": "..."}` → `{"response": "...", "session": "<id>"}` |
+| `/` | `POST` | Bearer token (if set) | Body `{"prompt": "..."}` (optional `"stream": true`, `"images": ["data:image/...;base64,..."]`) → `{"response", "session", "usage"}`; with `stream: true` the reply is newline-delimited JSON |
 | `/health` | `GET` | none | Returns `{"status":"ok","sessions":N}` for liveness probes |
 
 - The conversation is **isolated per session**. Send an `X-Session-Id: <name>` header to pick a conversation; requests with different ids never share context. Omit the header to use the `default` session. Each session is persisted to its own JSON file under the `--session` directory.
+- Session ids are used as file names, so they are validated (`[A-Za-z0-9._-]`, up to 64 characters, no leading dot or Windows device names). Request bodies are capped at 64 MB and the process keeps at most 256 distinct sessions, so a misbehaving client cannot exhaust memory or the disk.
+- With `"stream": true` the daemon emits NDJSON events: `{"type":"delta","text":...}`, `{"type":"tool","name","summary","output"}`, `{"type":"note","text"}`, `{"type":"usage","requests","prompt_tokens","completion_tokens"}`, then `{"type":"done","response",...}` or `{"type":"error","error"}`. A `stream` turn can be stopped from the desktop; the daemon notices at the next event boundary.
 - The daemon binds to `127.0.0.1` by default. Set `--daemon-bind 0.0.0.0` only behind a trusted reverse proxy / tunnel.
 - **Always set a token** (`--daemon-token` or `NANOHERMES_DAEMON_TOKEN`) when the port is reachable from outside localhost. Requests without a valid `Authorization: Bearer <token>` header get `401`.
 - For production, put it behind a reverse proxy (e.g. Cloudflare Tunnel, Caddy, nginx) that terminates TLS; keep the daemon on loopback.
@@ -658,7 +703,7 @@ Never publish 8787 directly: the only credential is the Bearer token, and the tr
 
 1. **Settings → Execution location**: pick **Cloud**, enter the URL (`https://daemon.example.com:8443` or the tunnel address) and the token from `/opt/nanohermes/.daemon_token`, then click **Check** (`GET /health`).
 2. New tasks can then be created as cloud tasks; each one carries its own `X-Session-Id`, so conversations stay separate on the daemon.
-3. Cloud turns run with the daemon's configuration: model profile, persona, advanced tuning and the permission mode are **not** sent from the desktop. Permission mode is fixed at daemon startup (`--permission-mode`), so changing it means restarting the service. A cloud turn also cannot be cancelled mid-flight — the daemon owns the whole request.
+3. Cloud turns run with the daemon's configuration: model profile, persona, advanced tuning and the permission mode are **not** sent from the desktop. Permission mode is fixed at daemon startup (`--permission-mode`), so changing it means restarting the service. A cloud turn can be stopped from the desktop, but the stop takes effect when the daemon emits its next stream event — the daemon owns the whole request and has no out-of-band cancel channel.
 
 ### Operations
 
@@ -682,11 +727,19 @@ agent --session work.json "refactor the search module"
 
 # Resume later — history is loaded from the file
 agent --session work.json
+
+# Resume the most recent session recorded for this directory (no file to remember)
+agent -c
+
+# List saved sessions and pick one
+agent -r
 ```
+
+`-c` / `-r` use the sessions directory `~/.nanohermes/sessions/`, keyed by a hash of the workspace path; `--session` keeps using the path you give it.
 
 - The session file is a JSON array of OpenAI-style messages (system, user, assistant, tool).
 - It is written atomically (write to a `.tmp` sibling, then rename) so a crash mid-write cannot truncate the session.
-- The file is saved after every completed turn and after `/clear`.
+- The file is saved after every completed turn and after `/clear` — including turns that fail at the API, so fixing the key and retrying keeps the conversation.
 - If the file cannot be loaded on startup, NanoHermes falls back to a fresh conversation and prints a warning.
 
 ## Context management
@@ -715,12 +768,12 @@ In the REPL, queue images with `/image <path>` and they are attached to the next
 
 - **No async runtime.** HTTP uses the blocking `ureq` client; MCP I/O uses a dedicated reader thread per server; tool calls run on scoped OS threads. This avoids the memory overhead of a tokio/async runtime.
 - **Minimal dependencies.** Only `serde_json`, `ureq` (with TLS), and `base64`. No `serde` derive proc-macros (values are handled as `serde_json::Value`). No `libc`: the Landlock sandbox and the SIGINT handler reach the kernel through a tiny raw-syscall shim (`agent/src/sys.rs`).
-- **Bounded output.** Tool results are clamped to 20 KB; command output is capped at 256 KB per stream; file reads refuse files over 4 MB. Project guidance and skill bodies are each capped at 20 KB. This keeps the context window and process memory bounded.
-- **Thread safety.** `Server` wraps its `Child` process and reader `JoinHandle` in `Mutex` so that `Manager` (and therefore `Agent`) is `Sync`, enabling safe concurrent tool execution.
+- **Bounded work and output.** Tool results are clamped to 20 KB; command output is capped at 256 KB per stream; file reads refuse files over 4 MB; project guidance and skill bodies are read at most 64 KB and injected up to 20 KB. Glob matching has a work budget (nested `**` cannot hang a turn), hooks time out after 30 s plus a bounded drain, and `git` calls are capped at 60 s. This keeps the context window, process memory and turn latency bounded.
+- **Thread safety.** `Server` wraps its `Child` process and reader `JoinHandle` in `Mutex` so that `Manager` (and therefore `Agent`) is `Sync`, enabling safe concurrent tool execution. State mutexes in the GUI and MCP layers recover from poisoning, so one panicking thread does not brick later calls.
 
 ## Desktop performance notes
 
-- **No blocking Tauri commands.** A synchronous `#[tauri::command]` runs on the window's main thread, so any disk or network work would freeze the UI for the whole turn. Everything that touches the filesystem, spawns a process or makes an HTTP request is an `async fn` that hands the work to `tauri::async_runtime::spawn_blocking`; only the two pure-memory commands (`get_settings`, `stop_task`) stay synchronous. The concurrent settings write path is serialised with a static mutex so two flushes cannot land out of order.
+- **No blocking Tauri commands.** A synchronous `#[tauri::command]` runs on the window's main thread, so any disk or network work would freeze the UI for the whole turn. Everything that touches the filesystem, spawns a process or makes an HTTP request is an `async fn` that hands the work to `tauri::async_runtime::spawn_blocking`; only the two pure-memory commands (`get_settings`, `stop_task`) stay synchronous. Concurrent settings saves are serialised *and ordered*: each command records its arrival sequence and an older snapshot is discarded instead of overwriting a newer one, and the file is written temp-then-rename (a corrupt file is backed up rather than silently resetting every profile). Saving never rebuilds the agent mid-turn; a pending-rebind marker makes the next local turn pick up the new settings.
 - **Streaming is isolated.** Deltas never enter the global store while a turn is running. They travel through a dedicated subscription channel that only the currently streaming bubble subscribes to, and are committed to the transcript once per phase (tool call, turn end), so a long answer does not re-render the sidebar, panels or title bar.
 - **Virtualised transcript.** Only the messages in (and near) the viewport are mounted. Height measurement is skipped while the last bubble is growing, and follow-the-bottom scrolling is driven from the streaming channel without a React render.
 - **Incremental Markdown.** During streaming, the answer is split at blank lines outside code fences: settled blocks are rendered once and kept, an unclosed fence only updates its `code` text node, and syntax highlighting runs per code block after the turn settles rather than over the whole answer at once.
@@ -733,28 +786,30 @@ npm run build            # frontend: type-check + bundle
 ```
 
 The frontend suite (Vitest + jsdom) is described above; the Rust workspace tests include:
-- Patch application (simple, multi-hunk, insertion, missing-context errors)
-- Glob matching
+- Patch application (simple, multi-hunk, pure insertion, non-ASCII context, missing-context errors)
+- Glob matching (character-wise `?`, bounded nested `**`)
+- File-tool sandbox: `read-only` refuses writes, `workspace-write` rejects paths outside the root
 - MCP resource/prompt listing and reading against a mock stdio server
 - MCP tool auto-dispatch
 - MCP streamable-HTTP handshake and tool call
 - MCP concurrency safety (concurrent mixed requests, stress bursts)
 - Agent `execute()` concurrency (built-in tools, mixed MCP + built-in)
-- HTML-to-text conversion and search-result parsing (web tools)
+- Web tools: SSRF target rejection and redirect resolution, HTML-to-text conversion, search-result parsing
 - Session task list (`todo_write` / `todo_read`)
 - Git tools (status / diff / commit / log round-trip)
 - Token-usage parsing and retry backoff computation
+- Streaming and buffered LLM replies against a local mock endpoint, including transient-5xx retry and stream-truncation handling
 - Multimodal content assembly (text + image parts)
-- Session save/load round-trip
+- Session save/load round-trip, including failed turns
 - Project guidance injection from `AGENTS.md` (and disabling it)
 - Skill discovery (frontmatter, fallback naming, workspace shadowing)
-- Hook execution (exit codes, tool-name matcher, stdin payload)
+- Hook execution (exit codes, tool-name matcher, stdin payload, a hook that writes before reading stdin does not deadlock)
 - Sub-agent job board ordering and the concurrency gate
-- Approval-policy decisions and trusted-command detection
+- Approval-policy decisions and trusted-command detection (git `-c`/`--git-dir` and write-capable "read-only" tools are untrusted)
 - Landlock enforcement of the workspace boundary
 - SIGINT flag set/clear
-- Long-term memory (CJK bigram tokenisation, BM25 ranking, deduplication, distillation gating)
-- Desktop shell: NDJSON stream parsing (deltas, tool events, error and truncation detection), folder browsing, model/daemon URL normalisation, cloud-location parsing, export file-name sanitising, output clipping, and a regression test asserting that long-running commands never run synchronously on the main thread
+- Long-term memory (CJK unigram/bigram tokenisation, BM25 ranking, eviction order, deduplication, distillation gating)
+- Desktop shell: NDJSON stream parsing (deltas, tool events, error and truncation detection), folder browsing, model/daemon URL normalisation, cloud-location parsing, session-id validation, export file-name sanitising, output clipping, and a regression test asserting that long-running commands never run synchronously on the main thread
 
 The mock MCP server used by tests lives in `agent/tests/mock_mcp_server.py`.
 

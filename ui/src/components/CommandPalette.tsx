@@ -100,9 +100,8 @@ export function CommandPalette({
         icon: "square",
         label: "停止正在执行的任务",
         hint: "当前步骤结束后生效",
-        // 云端这一轮的连接被 daemon 串行占用，本机发出的停止指令无法同时送达，
-        // 因此云端任务不提供这一项（避免给出按不动的假按钮）。
-        hide: !st.busy || cloud,
+        // 本机与云端都支持：云端在读到下一个 NDJSON 事件时发现停止标志并断开。
+        hide: !st.busy,
         run: () => void stop(),
       },
       {
@@ -277,8 +276,16 @@ export function CommandPalette({
   // 选中项永远落在有效范围内，搜索变化时回到第一项。
   const active = Math.min(sel, Math.max(0, filtered.length - 1));
 
+  // 打开时接住焦点，关闭时还回去（面板是条件渲染，卸载即关闭）。
   useEffect(() => {
+    const prev = document.activeElement as HTMLElement | null;
     input.current?.focus();
+    return () => {
+      const active = document.activeElement;
+      if (!active || active === document.body || active.closest(".cmd-back")) {
+        prev?.focus?.();
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -309,7 +316,13 @@ export function CommandPalette({
   };
 
   return (
-    <div className="cmd-back" onMouseDown={() => closePalette()}>
+    <div
+      className="cmd-back"
+      role="dialog"
+      aria-modal="true"
+      aria-label="命令面板"
+      onMouseDown={() => closePalette()}
+    >
       <div className="cmd" onMouseDown={(e) => e.stopPropagation()}>
         <div className="cmd-in">
           <Icon name="search" />
@@ -318,6 +331,7 @@ export function CommandPalette({
             value={q}
             spellCheck={false}
             placeholder="搜索命令…"
+            aria-label="搜索命令"
             onChange={(e) => {
               setQ(e.target.value);
               setSel(0);

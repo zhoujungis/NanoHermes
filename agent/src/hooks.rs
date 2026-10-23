@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -46,17 +46,32 @@ pub fn run(def: &HookDef, tool: &str, args: &Value, root: &Path) -> Result<HookO
         .spawn()
         .map_err(|e| format!("failed to spawn hook `{}`: {e}", def.command))?;
 
-    // Feed the tool call in, then close stdin so the hook sees EOF.
-    if let Some(mut stdin) = child.stdin.take() {
-        let payload = json!({ "tool": tool, "event": event, "arguments": args }).to_string();
-        let _ = stdin.write_all(payload.as_bytes());
-    }
-
-    // Drain both pipes on separate threads so a chatty hook cannot deadlock.
+    // Start draining before writing stdin: a hook that writes output before it
+    // reads its input would otherwise fill the stdout pipe and deadlock while
+    // the parent blocks in `write_all` (the timeout would never be reached).
     let out_pipe = child.stdout.take().expect("stdout piped");
     let err_pipe = child.stderr.take().expect("stderr piped");
-    let out_thread = std::thread::spawn(move || read_capped(out_pipe));
-    let err_thread = std::thread::spawn(move || read_capped(err_pipe));
+    let (tx, rx) = std::sync::mpsc::channel::<(bool, Vec<u8>)>();
+    let pipes: [(bool, Box<dyn Read + Send>); 2] =
+        [(true, Box::new(out_pipe)), (false, Box::new(err_pipe))];
+    for (is_stdout, pipe) in pipes {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let (kept, _) = read_capped(pipe);
+            let _ = tx.send((is_stdout, kept));
+        });
+    }
+    drop(tx);
+
+    // Feed the tool call from its own thread and close stdin afterwards (drop
+    // of the handle). Payloads can be large (file contents) and a hook is free
+    // not to read them at all.
+    if let Some(mut stdin) = child.stdin.take() {
+        let payload = json!({ "tool": tool, "event": event, "arguments": args }).to_string();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(payload.as_bytes());
+        });
+    }
 
     let start = Instant::now();
     let code = loop {
@@ -74,8 +89,31 @@ pub fn run(def: &HookDef, tool: &str, args: &Value, root: &Path) -> Result<HookO
         }
     };
 
-    let (out, _) = out_thread.join().unwrap_or_default();
-    let (err, _) = err_thread.join().unwrap_or_default();
+    // Collect with a bound instead of joining the reader threads. On timeout the
+    // killed shell may leave grandchildren holding the pipes open, and joining
+    // them would hang far past the intended deadline.
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut got_out = false;
+    let mut got_err = false;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !(got_out && got_err) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(left) {
+            Ok((true, kept)) => {
+                out = kept;
+                got_out = true;
+            }
+            Ok((false, kept)) => {
+                err = kept;
+                got_err = true;
+            }
+            Err(_) => break,
+        }
+    }
 
     let mut output = String::new();
     let stdout = String::from_utf8_lossy(&out);
@@ -145,6 +183,33 @@ mod tests {
         .unwrap();
         assert!(out.ok(), "hook output: {}", out.output);
         assert!(out.output.contains("ok"), "hook output: {}", out.output);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_that_writes_before_reading_stdin_does_not_deadlock() {
+        // 200 KB to stdout (> pipe buffer) before touching stdin, while stdin
+        // carries a payload larger than the pipe buffer too.
+        let def = hook(
+            HookEvent::PreToolUse,
+            "yes x | head -c 200000; cat >/dev/null; echo done",
+        );
+        let big = "a".repeat(200_000);
+        let start = Instant::now();
+        let out = run(
+            &def,
+            "write_file",
+            &json!({ "content": big }),
+            Path::new("/"),
+        )
+        .unwrap();
+        assert!(out.ok(), "hook output: {}", out.output);
+        assert!(out.output.contains("done"), "hook output: {}", out.output);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "hook deadlocked: {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
