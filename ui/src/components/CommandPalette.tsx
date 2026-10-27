@@ -43,7 +43,6 @@ interface Cmd {
 /** 模式入口：值与后端 PermissionMode 对应，标签与输入区保持一致。 */
 const MODES: Array<[string, string]> = [
   ["default", "Agent"],
-  ["accept-edits", "Accept"],
   ["plan", "Plan"],
   ["goal", "Goal"],
   ["debug", "Debug"],

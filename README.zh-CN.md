@@ -104,7 +104,6 @@ cd gui && npx --no-install tauri build   # release 构建 + 打包安装程序
 | 值 | 界面标签 | 行为 |
 |----|---------|------|
 | `default` | Agent | 全部工具可用，文件修改与命令自动执行。 |
-| `accept-edits` | Accept | 自动执行文件修改，命令仍需确认。 |
 | `plan` | Plan | 只读分析：不写文件、不执行命令。 |
 | `goal` | Goal | 目标模式：无人值守，所有工具自动执行直到完成。 |
 | `debug` | Debug | 诊断模式：可读文件、可执行命令以复现问题；编辑工具被禁用，但 shell 命令仍可能修改文件（需要硬保证时配合 `--sandbox read-only`）。 |
@@ -141,7 +140,7 @@ cd gui && npx --no-install tauri build   # release 构建 + 打包安装程序
 | 模型 | 一组模型档案（名称、API Key、Base URL、模型名）—— 想加几个加几个，在输入区按任务切换。**设为默认**标记新任务使用的那个；**测试连接**用屏幕上当前的值探测该端点的 `/models`。 |
 | 人设 | 一组人设（名称 + 附加系统提示词）—— 附加指令拼在内置提示词之后，内置的规则与安全约束仍然生效。留空的人设不附加任何内容；**当前默认**标记新任务使用的那套，任务也可以各选各的。 |
 | 提示词片段 | 可复用的短语或模板，在输入区点闪电即可插入。 |
-| 高级 | 本机任务的运行参数：深度思考、读取项目指南（AGENTS.md / NANOHERMES.md）、长期记忆（默认开启；关闭后不再提炼新记忆，已有条目保留）、温度、最大迭代、最大输出 tokens。 |
+| 高级 | 本机任务的运行参数：深度思考、读取项目指南（AGENTS.md / NANOHERMES.md）、长期记忆（默认开启；关闭后不再提炼新记忆，已有条目保留）、温度、最大输出 tokens。 |
 | 执行位置 | 在本机进程内运行，或转发到远程 daemon；含 daemon 基地址与 Bearer Token —— **检查**探测 `GET /health`。 |
 | 工作区 | 默认项目目录；每个任务可单独覆盖。 |
 | 默认项 | 新任务的默认执行位置、默认权限模式。 |
@@ -212,7 +211,7 @@ NanoHermes 通过配置文件、环境变量和 CLI 参数配置。优先级：*
 {
   "base_url": "https://openrouter.ai/api/v1",
   "model": "anthropic/claude-sonnet-4",
-  "permission_mode": "accept-edits",
+  "permission_mode": "plan",
   "approval_policy": "on-request",
   "sandbox": "workspace-write",
   "thinking": true,
@@ -225,7 +224,7 @@ NanoHermes 通过配置文件、环境变量和 CLI 参数配置。优先级：*
 }
 ```
 
-支持的键：`api_key`、`base_url`、`model`、`temperature`、`max_tokens`、`stream`、`max_iterations`、`cwd`、`auto_approve`、`approval_policy`、`sandbox`、`timeout_secs`、`max_retries`、`retry_base_ms`、`mcp_config`、`session`、`permission_mode`、`allowed_tools`、`disallowed_tools`、`fallback_model`、`output_format`、`input_format`、`continue_session`、`resume_session`、`thinking`、`project_docs`、`memory`、`memory_dir`、`system_prompt`、`daemon`、`daemon_port`、`daemon_bind`、`daemon_token`、`subagents_config`、`hooks`。
+支持的键：`api_key`、`base_url`、`model`、`temperature`、`max_tokens`、`stream`、`cwd`、`auto_approve`、`approval_policy`、`sandbox`、`timeout_secs`、`max_retries`、`retry_base_ms`、`mcp_config`、`session`、`permission_mode`、`allowed_tools`、`disallowed_tools`、`fallback_model`、`output_format`、`input_format`、`continue_session`、`resume_session`、`thinking`、`project_docs`、`memory`、`memory_dir`、`system_prompt`、`daemon`、`daemon_port`、`daemon_bind`、`daemon_token`、`subagents_config`、`hooks`。
 
 ### CLI 参数
 
@@ -248,7 +247,6 @@ echo "PROMPT" | agent [OPTIONS]  从 stdin 读取提示并单次执行
 | `--session <FILE>` | 将对话历史持久化到 FILE（启动时若存在则加载） |
 | `-c, --continue` | 续接当前工作区最近记录的那个会话 |
 | `-r, --resume` | 列出已保存会话并交互选择一个续接 |
-| `-n, --max-iterations <N>` | 每轮模型↔工具的最大往返次数（默认 40） |
 | `--max-tokens <N>` | 最大响应 token 数（默认 4096） |
 | `--temperature <F>` | 采样温度（默认 0.0） |
 | `--timeout <SECS>` | HTTP 请求超时（默认 120） |
@@ -262,7 +260,7 @@ echo "PROMPT" | agent [OPTIONS]  从 stdin 读取提示并单次执行
 | `--approval-policy <POLICY>` | 何时确认 shell 命令：`never` \| `on-request` \| `untrusted`（默认 `never`，即自动批准） |
 | `-y, --yes` | 自动批准 shell 命令（`never` 策略；默认） |
 | `--sandbox <MODE>` | 文件系统沙箱：`off`（默认）\| `read-only` \| `workspace-write`。文件工具在所有平台生效；派生命令在 Linux 上使用 Landlock |
-| `--permission-mode <MODE>` | `default` \| `accept-edits` \| `plan` \| `goal` \| `debug`（见[权限模式](#权限模式)） |
+| `--permission-mode <MODE>` | `default` \| `plan` \| `goal` \| `debug`（见[权限模式](#权限模式)） |
 | `--allowed-tools <LIST>` | 逗号分隔的工具允许列表 |
 | `--disallowed-tools <LIST>` | 逗号分隔的工具禁止列表；`*` 禁止所有工具（含 MCP 与记忆工具） |
 | `--mode <MODE>` | 预设组合：`minimal`（零工具）\| `create`（仅文件工具，不执行 shell） |
@@ -287,7 +285,7 @@ echo "PROMPT" | agent [OPTIONS]  从 stdin 读取提示并单次执行
 | `/clear` | 重置对话（保留系统提示） |
 | `/undo [n]` | 回退最近 `n` 个完整用户轮次（默认 1） |
 | `/model <name>` | 切换当前模型 |
-| `/mode <mode>` | 切换权限模式（`default`、`accept-edits`、`plan`、`goal`、`debug`） |
+| `/mode <mode>` | 切换权限模式（`default`、`plan`、`goal`、`debug`） |
 | `/format <fmt>` | 切换输出格式（`text`、`json`、`stream-json`） |
 | `/tools` | 列出可用工具 |
 | `/status` | 显示会话统计 |

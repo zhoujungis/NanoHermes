@@ -45,7 +45,6 @@ function settings(patch: Partial<Settings> = {}): Settings {
     project_docs: true,
     memory: true,
     temperature: 0,
-    max_iterations: 40,
     max_tokens: 4096,
     ...patch,
   };

@@ -55,7 +55,6 @@ const settings: Settings = {
   project_docs: true,
   memory: true,
   temperature: 0,
-  max_iterations: 40,
   max_tokens: 4096,
 };
 
@@ -281,10 +280,10 @@ describe("人设、片段与高级参数", () => {
   it("数值参数会被夹到合法区间后保存", () => {
     render(<SettingsPage onClose={() => {}} />);
 
-    // 三个数字输入依次是：温度、最大迭代、最大输出 tokens。
+    // 两个数字输入依次是：温度、最大输出 tokens。
     const nums = screen.getAllByRole("spinbutton");
-    fireEvent.change(nums[1], { target: { value: "999" } });
-    expect((m.autosaveSettings.mock.calls.at(-1)?.[0] as Settings).max_iterations).toBe(200);
+    fireEvent.change(nums[1], { target: { value: "999999" } });
+    expect((m.autosaveSettings.mock.calls.at(-1)?.[0] as Settings).max_tokens).toBe(200000);
 
     fireEvent.change(nums[0], { target: { value: "5" } });
     expect((m.autosaveSettings.mock.calls.at(-1)?.[0] as Settings).temperature).toBe(2);
@@ -296,13 +295,13 @@ describe("人设、片段与高级参数", () => {
     const before = m.autosaveSettings.mock.calls.length;
 
     // 清空后应保持空白，让用户重新输入；以前 Number("") === 0 会立刻夹成 1。
-    fireEvent.change(nums[2], { target: { value: "" } });
-    expect((nums[2] as HTMLInputElement).value).toBe("");
+    fireEvent.change(nums[1], { target: { value: "" } });
+    expect((nums[1] as HTMLInputElement).value).toBe("");
     expect(m.autosaveSettings.mock.calls.length).toBe(before);
 
     // 失焦时还原成上一次生效的值，并兜底落盘。
-    fireEvent.blur(nums[2]);
-    expect((nums[2] as HTMLInputElement).value).toBe("4096");
+    fireEvent.blur(nums[1]);
+    expect((nums[1] as HTMLInputElement).value).toBe("4096");
     expect(m.flushSettings).toHaveBeenCalled();
   });
 });

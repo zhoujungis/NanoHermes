@@ -146,15 +146,12 @@ struct Snippet {
 }
 
 // Serde defaults for the advanced tuning fields: an older file predates them, so
-// a plain `#[serde(default)]` would zero them out (0 iterations = unusable).
+// a plain `#[serde(default)]` would zero them out (0 max tokens = unusable).
 fn default_true() -> bool {
     true
 }
 fn default_temperature() -> f64 {
     0.0
-}
-fn default_max_iterations() -> usize {
-    40
 }
 fn default_max_tokens() -> u32 {
     4096
@@ -182,7 +179,7 @@ struct AppSettings {
     active_model: String,
     #[serde(default)]
     workspace: String,
-    /// `default` | `accept-edits` | `plan` | `goal` | `debug`, mirroring
+    /// `default` | `plan` | `goal` | `debug`, mirroring
     /// `PermissionMode`.
     #[serde(default = "default_mode")]
     mode: String,
@@ -219,9 +216,6 @@ struct AppSettings {
     /// Sampling temperature for local tasks.
     #[serde(default = "default_temperature")]
     temperature: f64,
-    /// Hard cap on model<->tool round trips per turn, for local tasks.
-    #[serde(default = "default_max_iterations")]
-    max_iterations: usize,
     /// Cap on tokens the model may generate per reply, for local tasks.
     #[serde(default = "default_max_tokens")]
     max_tokens: u32,
@@ -259,7 +253,6 @@ impl Default for AppSettings {
             project_docs: true,
             memory: true,
             temperature: default_temperature(),
-            max_iterations: default_max_iterations(),
             max_tokens: default_max_tokens(),
         }
     }
@@ -640,7 +633,6 @@ fn build_agent(
         project_docs: s.project_docs,
         memory: s.memory,
         temperature: s.temperature,
-        max_iterations: s.max_iterations.max(1),
         max_tokens: s.max_tokens.max(1),
         system_prompt: s.persona_prompt(persona),
         ..Config::default()
@@ -2036,7 +2028,6 @@ mod tests {
         // 高级参数在旧文件里根本没有，必须回落到有意义的默认值而不是 0。
         assert!(s.project_docs, "默认要读取项目指南");
         assert!(!s.thinking);
-        assert_eq!(s.max_iterations, 40, "0 次迭代会让任务直接不可用");
         assert_eq!(s.max_tokens, 4096);
 
         s.active_persona = "不存在".into();

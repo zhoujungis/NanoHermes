@@ -104,7 +104,6 @@ cd gui && npx --no-install tauri build   # release build + installers
 | Value | UI label | Behaviour |
 |-------|----------|-----------|
 | `default` | Agent | All tools available; file edits and commands run without asking. |
-| `accept-edits` | Accept | File edits auto-approved, commands gated. |
 | `plan` | Plan | Read-only: no writes, no commands. |
 | `goal` | Goal | Unattended: every tool runs until the task is finished. |
 | `debug` | Debug | Reads files and runs commands to reproduce a problem; the file-editing tools are blocked, but shell commands can still modify the tree (combine with `--sandbox read-only` for a hard guarantee). |
@@ -141,7 +140,7 @@ The mode is stored in settings as the default for new tasks and can be switched 
 | Models | A list of model profiles (name, API key, base URL, model name) — add as many as you like and switch per task from the composer. **Set default** marks the one new tasks start on; **Test** probes that endpoint's `/models` with the values on screen. |
 | Personas | A list of personas (name + extra system-prompt instructions) — the extra text is appended after the built-in prompt, so the built-in rules and safety constraints stay in force. A blank persona adds nothing; **Current default** marks the one new tasks start on, and each task may pick its own. |
 | Prompt snippets | Reusable phrases or templates; click the bolt in the composer to insert one. |
-| Advanced | Tuning for local tasks: extended thinking, read project guide (AGENTS.md / NANOHERMES.md), long-term memory (on by default; turning it off stops new distillation but keeps existing entries), temperature, max iterations, max output tokens. |
+| Advanced | Tuning for local tasks: extended thinking, read project guide (AGENTS.md / NANOHERMES.md), long-term memory (on by default; turning it off stops new distillation but keeps existing entries), temperature, max output tokens. |
 | Location | Run tasks in-process or forward them to a remote daemon, plus the daemon base URL and Bearer token — **Check** probes `GET /health`. |
 | Workspace | The default project folder; each task may override it. |
 | Defaults | Execution location for new tasks, default permission mode. |
@@ -212,7 +211,7 @@ Besides environment variables and flags, NanoHermes reads a JSON config file. `~
 {
   "base_url": "https://openrouter.ai/api/v1",
   "model": "anthropic/claude-sonnet-4",
-  "permission_mode": "accept-edits",
+  "permission_mode": "plan",
   "approval_policy": "on-request",
   "sandbox": "workspace-write",
   "thinking": true,
@@ -225,7 +224,7 @@ Besides environment variables and flags, NanoHermes reads a JSON config file. `~
 }
 ```
 
-Supported keys: `api_key`, `base_url`, `model`, `temperature`, `max_tokens`, `stream`, `max_iterations`, `cwd`, `auto_approve`, `approval_policy`, `sandbox`, `timeout_secs`, `max_retries`, `retry_base_ms`, `mcp_config`, `session`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `fallback_model`, `output_format`, `input_format`, `continue_session`, `resume_session`, `thinking`, `project_docs`, `memory`, `memory_dir`, `system_prompt`, `daemon`, `daemon_port`, `daemon_bind`, `daemon_token`, `subagents_config`, and `hooks`.
+Supported keys: `api_key`, `base_url`, `model`, `temperature`, `max_tokens`, `stream`, `cwd`, `auto_approve`, `approval_policy`, `sandbox`, `timeout_secs`, `max_retries`, `retry_base_ms`, `mcp_config`, `session`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `fallback_model`, `output_format`, `input_format`, `continue_session`, `resume_session`, `thinking`, `project_docs`, `memory`, `memory_dir`, `system_prompt`, `daemon`, `daemon_port`, `daemon_bind`, `daemon_token`, `subagents_config`, and `hooks`.
 
 ### CLI flags
 
@@ -248,7 +247,6 @@ echo "PROMPT" | agent [OPTIONS]  one-shot with the prompt on stdin
 | `--session <FILE>` | Persist conversation history to FILE (loaded on startup if present) |
 | `-c, --continue` | Resume the most recent session recorded for this workspace |
 | `-r, --resume` | List saved sessions and pick one to resume |
-| `-n, --max-iterations <N>` | Max model↔tool round trips per turn (default 40) |
 | `--max-tokens <N>` | Max response tokens (default 4096) |
 | `--temperature <F>` | Sampling temperature (default 0.0) |
 | `--timeout <SECS>` | HTTP request timeout (default 120) |
@@ -262,7 +260,7 @@ echo "PROMPT" | agent [OPTIONS]  one-shot with the prompt on stdin
 | `--approval-policy <POLICY>` | When shell commands are confirmed: `never` \| `on-request` \| `untrusted` (default `never`, i.e. auto-approve) |
 | `-y, --yes` | Auto-approve shell commands (`never` policy; default) |
 | `--sandbox <MODE>` | Filesystem sandbox: `off` (default) \| `read-only` \| `workspace-write`. File tools enforce it everywhere; spawned commands use Landlock on Linux |
-| `--permission-mode <MODE>` | `default` \| `accept-edits` \| `plan` \| `goal` \| `debug` (see [Permission modes](#permission-modes)) |
+| `--permission-mode <MODE>` | `default` \| `plan` \| `goal` \| `debug` (see [Permission modes](#permission-modes)) |
 | `--allowed-tools <LIST>` | Comma-separated allow-list of tool names |
 | `--disallowed-tools <LIST>` | Comma-separated deny-list of tool names; `*` denies every tool, including MCP and memory tools |
 | `--mode <MODE>` | Preset bundle: `minimal` (no tools) \| `create` (file tools only, no shell) |
@@ -287,7 +285,7 @@ When running interactively:
 | `/clear` | Reset the conversation (keeps the system prompt) |
 | `/undo [n]` | Rewind the last `n` full user turns (default 1) |
 | `/model <name>` | Switch the active model |
-| `/mode <mode>` | Switch permission mode (`default`, `accept-edits`, `plan`, `goal`, `debug`) |
+| `/mode <mode>` | Switch permission mode (`default`, `plan`, `goal`, `debug`) |
 | `/format <fmt>` | Switch output format (`text`, `json`, `stream-json`) |
 | `/tools` | List available tools |
 | `/status` | Show session stats |

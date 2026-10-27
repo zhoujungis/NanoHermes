@@ -148,7 +148,6 @@ export interface Settings {
   /** 长期记忆：对话收尾自动沉淀经验/偏好，新会话按相关度检索注入。 */
   memory: boolean;
   temperature: number;
-  max_iterations: number;
   max_tokens: number;
 }
 

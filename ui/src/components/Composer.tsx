@@ -30,22 +30,12 @@ import { SnippetMenu } from "./SnippetMenu";
 /** 模式切换：值、短标签、说明（与后端 PermissionMode 一一对应）。 */
 const MODES: Array<[string, string, string]> = [
   ["default", "Agent", "全部工具可用，文件修改与命令自动执行"],
-  ["accept-edits", "Accept", "自动执行文件修改，命令仍需确认"],
   ["plan", "Plan", "只读分析：不写文件、不执行命令"],
   ["goal", "Goal", "目标模式：无人值守，所有工具自动执行直到完成"],
   ["debug", "Debug", "诊断模式：可读文件、可执行命令，但不修改文件"],
 ];
 
-/** 权限提示文案。 */
-const PERM: Record<string, string> = {
-  default: "自动批准",
-  "accept-edits": "自动修改",
-  plan: "只读分析",
-  goal: "无人值守",
-  debug: "只读诊断",
-};
-
-/** 输入区：引用文件、模式切换、权限提示、发送。 */
+/** 输入区：引用文件、模式切换、发送。 */
 export function Composer({
   onOpenPicker,
   onOpenSettings,
@@ -67,7 +57,6 @@ export function Composer({
   const ready = cloud
     ? !!(st.settings?.cloud_url || "").trim()
     : !!(resolveModel(st.settings, task?.model)?.api_key || "").trim();
-  const plan = st.mode === "plan" || st.mode === "debug";
   // 当前任务里排队等待发送的消息；只有本任务正在跑时才会自动续发。
   const queue = task?.queue ?? [];
   const queueAuto = st.busy && runningTaskId() === task?.id;
@@ -404,29 +393,18 @@ export function Composer({
                 <span>云端服务</span>
               </div>
             ) : (
-              <>
-                <div className="seg">
-                  {MODES.map(([value, label, desc]) => (
-                    <button
-                      key={value}
-                      title={desc}
-                      className={st.mode === value ? "on" : ""}
-                      onClick={() => void setMode(value)}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-
-                <div
-                  className="perm"
-                  title="工具调用权限"
-                  style={plan ? { color: "var(--warn)" } : undefined}
-                >
-                  <Icon name="shield" />
-                  <span>{PERM[st.mode] || "自动批准"}</span>
-                </div>
-              </>
+              <div className="seg">
+                {MODES.map(([value, label, desc]) => (
+                  <button
+                    key={value}
+                    title={desc}
+                    className={st.mode === value ? "on" : ""}
+                    onClick={() => void setMode(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             )}
 
             <div className="sp" />

@@ -84,7 +84,7 @@ fn mode_guidance(mode: crate::config::PermissionMode) -> Option<&'static str> {
             "Plan mode — read-only analysis. Describe the change you would make and the files \
              involved; never edit files or run mutating commands.",
         ),
-        PermissionMode::Default | PermissionMode::AcceptEdits => None,
+        PermissionMode::Default => None,
     }
 }
 

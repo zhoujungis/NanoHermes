@@ -109,8 +109,8 @@ impl Agent {
             cfg.stream = false;
         }
         // The permission mode may override the configured approval behaviour
-        // (e.g. AcceptEdits keeps shell confirmation on, Goal never blocks).
-        // Remember the configured values so leaving the mode restores them.
+        // (e.g. Goal never blocks). Remember the configured values so leaving
+        // the mode restores them.
         let base_auto_approve = cfg.auto_approve;
         let base_approval = cfg.approval_policy;
         let auto_approve = cfg.permission_mode.auto_approve(base_auto_approve);
@@ -348,7 +348,8 @@ impl Agent {
         let mut interrupted = false;
         let mut had_tools = false;
         let mut final_text = String::new();
-        for _ in 0..self.cfg.max_iterations {
+        // 无迭代上限：一直跑到模型不再调用工具、被停止或请求出错为止。
+        loop {
             // Abort only at a step boundary so the history never keeps an
             // assistant tool-call without its matching tool result.
             if crate::interrupt::take() {
@@ -439,13 +440,8 @@ impl Agent {
                     "interrupted — the conversation was kept; type a new instruction or /undo to rewind",
                 );
             }
-        } else if !completed {
-            self.style.warn(&format!(
-                "reached the {} iteration limit without finishing",
-                self.cfg.max_iterations
-            ));
         }
-        // 对话收尾自动提炼：只在完整结束的轮次沉淀（中断/超限的半截对话不提炼），
+        // 对话收尾自动提炼：只在完整结束的轮次沉淀（中断的半截对话不提炼），
         // 提炼失败只影响记忆，不影响对话结果。
         if completed && self.cfg.memory {
             self.distill_memories(&user_text, had_tools);
@@ -730,7 +726,8 @@ impl Agent {
         ];
 
         let mut result = String::new();
-        for _ in 0..sub_cfg.max_iterations {
+        // 与主循环一致：子代理也没有迭代上限，直到模型不再调用工具。
+        loop {
             let turn = llm::chat(&sub_cfg, &messages, &tools, |_| {})?;
             result = turn.content.clone();
             messages.push(assistant_message(&turn));

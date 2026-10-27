@@ -8,9 +8,6 @@ use serde_json::Value;
 pub enum PermissionMode {
     /// Normal operation: respect `auto_approve` for run_command, all tools available.
     Default,
-    /// Auto-approve file edits (write_file / edit_file / apply_patch) but still
-    /// require confirmation for shell commands.
-    AcceptEdits,
     /// Read-only planning: mutating tools (write_file, edit_file, apply_patch,
     /// run_command) are rejected. Useful for safe code analysis.
     Plan,
@@ -27,13 +24,14 @@ impl PermissionMode {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s.trim().to_ascii_lowercase().as_str() {
             "default" => Ok(PermissionMode::Default),
-            "accept-edits" | "acceptedits" => Ok(PermissionMode::AcceptEdits),
+            // 旧配置里的 accept-edits 已移除，映射为 default 保证降级/升级配置不报错。
+            "accept-edits" | "acceptedits" => Ok(PermissionMode::Default),
             "plan" => Ok(PermissionMode::Plan),
             // "goat" is accepted because that is how the mode is commonly typed.
             "goal" | "goat" => Ok(PermissionMode::Goal),
             "debug" => Ok(PermissionMode::Debug),
             other => Err(format!(
-                "unknown permission mode `{other}` (expected: default, accept-edits, plan, goal, debug)"
+                "unknown permission mode `{other}` (expected: default, plan, goal, debug)"
             )),
         }
     }
@@ -43,7 +41,6 @@ impl PermissionMode {
     pub fn as_str(self) -> &'static str {
         match self {
             PermissionMode::Default => "default",
-            PermissionMode::AcceptEdits => "accept-edits",
             PermissionMode::Plan => "plan",
             PermissionMode::Goal => "goal",
             PermissionMode::Debug => "debug",
@@ -52,11 +49,10 @@ impl PermissionMode {
 
     /// Whether tool calls run without asking anyone, overriding `configured`.
     ///
-    /// `AcceptEdits` always keeps shell confirmation on; `Goal` has nobody to
-    /// ask, so it never blocks; the rest inherit the configured flag.
+    /// `Goal` has nobody to ask, so it never blocks; the rest inherit the
+    /// configured flag.
     pub fn auto_approve(self, configured: bool) -> bool {
         match self {
-            PermissionMode::AcceptEdits => false,
             PermissionMode::Goal => true,
             PermissionMode::Default | PermissionMode::Plan | PermissionMode::Debug => configured,
         }
@@ -74,7 +70,7 @@ impl PermissionMode {
     /// Tools that are blocked in this mode regardless of allow/deny lists.
     pub fn blocked_tools(self) -> &'static [&'static str] {
         match self {
-            PermissionMode::Default | PermissionMode::AcceptEdits | PermissionMode::Goal => &[],
+            PermissionMode::Default | PermissionMode::Goal => &[],
             PermissionMode::Plan => &[
                 "write_file",
                 "edit_file",
@@ -161,8 +157,6 @@ pub struct Config {
     pub max_tokens: u32,
     /// Stream assistant tokens as they arrive (SSE).
     pub stream: bool,
-    /// Hard cap on model<->tool round trips per user turn.
-    pub max_iterations: usize,
     pub workspace: PathBuf,
     /// When false, shell commands ask for confirmation on stdin first.
     pub auto_approve: bool,
@@ -413,7 +407,6 @@ impl Default for Config {
             temperature: 0.0,
             max_tokens: 4096,
             stream: true,
-            max_iterations: 40,
             workspace: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             auto_approve: true,
             approval_policy: ApprovalPolicy::Untrusted,
@@ -485,9 +478,6 @@ impl Config {
         }
         if let Some(b) = obj.get("stream").and_then(|x| x.as_bool()) {
             self.stream = b;
-        }
-        if let Some(n) = obj.get("max_iterations").and_then(|x| x.as_u64()) {
-            self.max_iterations = n as usize;
         }
         if let Some(s) = obj.get("cwd").and_then(|x| x.as_str()) {
             self.workspace = PathBuf::from(s);

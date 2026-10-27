@@ -492,7 +492,7 @@ fn repl(agent: &mut Agent) {
                 println!("  /clear           reset the conversation");
                 println!("  /undo [n]        rewind the last n turns (default 1)");
                 println!("  /model <name>    switch model");
-                println!("  /mode <mode>     switch permission mode (default|accept-edits|plan)");
+                println!("  /mode <mode>     switch permission mode (default|plan|goal|debug)");
                 println!("  /format <fmt>    switch output format (text|json|stream-json)");
                 println!("  /tools           list available tools");
                 println!("  /status          show session stats");
@@ -1117,7 +1117,6 @@ fn print_resolved_config(cfg: &Config) {
         "temperature": cfg.temperature,
         "max_tokens": cfg.max_tokens,
         "stream": cfg.stream,
-        "max_iterations": cfg.max_iterations,
         "workspace": cfg.workspace.display().to_string(),
         "auto_approve": cfg.auto_approve,
         "timeout_secs": cfg.timeout_secs,
@@ -1221,10 +1220,6 @@ fn parse_args(args: Vec<String>) -> CliParse {
             }
             "-c" | "--continue" => cfg.continue_session = true,
             "-r" | "--resume" => cfg.resume_session = true,
-            "-n" | "--max-iterations" => {
-                let v = need(&mut i, &args, a)?;
-                cfg.max_iterations = v.parse().map_err(|_| format!("invalid number: {v}"))?;
-            }
             "--timeout" => {
                 let v = need(&mut i, &args, a)?;
                 cfg.timeout_secs = v.parse().map_err(|_| format!("invalid number: {v}"))?;
@@ -1373,7 +1368,6 @@ OPTIONS:
         --session <FILE>        Persist conversation history to FILE (loaded on startup if present)
     -c, --continue              Auto-load the most recent session for this directory
     -r, --resume                List saved sessions and pick one to resume
-    -n, --max-iterations <N>    Max model<->tool round trips per turn (default 40)
         --max-tokens <N>        Max response tokens (default 4096)
         --temperature <F>       Sampling temperature (default 0.0)
         --timeout <SECS>        HTTP request timeout (default 120)
@@ -1385,7 +1379,7 @@ OPTIONS:
         --sandbox <MODE>        off | read-only | workspace-write
                                 (file tools: all platforms; commands: Linux Landlock)
     -y, --yes                   Auto-approve shell commands (default)
-        --permission-mode <M>   default | accept-edits | plan | goal | debug
+        --permission-mode <M>   default | plan | goal | debug
                                 (plan = read-only, debug = no edits but commands run,
                                  goal = unattended)
         --allowed-tools <LIST>  Comma-separated allow-list of tool names

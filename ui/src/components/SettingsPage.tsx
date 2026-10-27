@@ -17,7 +17,6 @@ import { Icon } from "./Icon";
 
 const MODES: Array<[string, string, string]> = [
   ["default", "Agent", "全部工具可用，文件修改与命令自动执行。"],
-  ["accept-edits", "Accept Edits", "自动执行文件修改，命令仍受限制。"],
   ["plan", "Plan", "只读分析：禁止写入文件与执行命令。"],
   ["goal", "Goal", "目标模式：无人值守，所有工具自动执行直到目标完成。"],
   ["debug", "Debug", "诊断模式：可读文件、可执行命令以复现问题，但不修改文件。"],
@@ -54,12 +53,10 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   const [projectDocs, setProjectDocs] = useState(st.settings?.project_docs !== false);
   const [memory, setMemory] = useState(st.settings?.memory !== false);
   const [temperature, setTemperature] = useState(st.settings?.temperature ?? 0);
-  const [maxIterations, setMaxIterations] = useState(st.settings?.max_iterations ?? 40);
   const [maxTokens, setMaxTokens] = useState(st.settings?.max_tokens ?? 4096);
-  // 三个数字输入框的显示草稿；真正的数值仍保存在上面的数字 state 里。
+  // 两个数字输入框的显示草稿；真正的数值仍保存在上面的数字 state 里。
   const [numberDraft, setNumberDraft] = useState({
     temperature: String(st.settings?.temperature ?? 0),
-    max_iterations: String(st.settings?.max_iterations ?? 40),
     max_tokens: String(st.settings?.max_tokens ?? 4096),
   });
   const [probe, setProbe] = useState<{ t: string; ok: boolean } | null>(null);
@@ -104,7 +101,6 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       project_docs: projectDocs,
       memory,
       temperature,
-      max_iterations: maxIterations,
       max_tokens: maxTokens,
     };
     const s = { ...base, ...patch };
@@ -222,7 +218,7 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const setNumber = (key: "temperature" | "max_iterations" | "max_tokens", raw: string): void => {
+  const setNumber = (key: "temperature" | "max_tokens", raw: string): void => {
     // 输入框用字符串草稿，才能先清空再重新输入。直接 `value={number}` 时，
     // 清空会先变成 `Number("") === 0`，被 clamp 成 0 / 1 又弹回来，光标也跟着跳。
     setNumberDraft((d) => ({ ...d, [key]: raw }));
@@ -233,10 +229,6 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
       const t = Math.min(2, Math.max(0, v));
       setTemperature(t);
       change({ temperature: t });
-    } else if (key === "max_iterations") {
-      const n = Math.min(200, Math.max(1, Math.round(v)));
-      setMaxIterations(n);
-      change({ max_iterations: n });
     } else {
       const n = Math.min(200000, Math.max(1, Math.round(v)));
       setMaxTokens(n);
@@ -245,10 +237,9 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
   };
 
   /** 失焦时把空草稿还原成上一次生效的值，避免输入框一直空着。 */
-  const settleNumber = (key: "temperature" | "max_iterations" | "max_tokens"): void => {
+  const settleNumber = (key: "temperature" | "max_tokens"): void => {
     if (!numberDraft[key].trim()) {
-      const committed =
-        key === "temperature" ? temperature : key === "max_iterations" ? maxIterations : maxTokens;
+      const committed = key === "temperature" ? temperature : maxTokens;
       setNumberDraft((d) => ({ ...d, [key]: String(committed) }));
     }
     void flushSettings();
@@ -775,18 +766,6 @@ export function SettingsPage({ onClose }: { onClose: () => void }) {
                     onBlur={() => settleNumber("temperature")}
                   />
                   <div className="hintline">0 更稳定，越大越发散。</div>
-                </div>
-                <div className="field">
-                  <label>最大迭代</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={200}
-                    value={numberDraft.max_iterations}
-                    onChange={(e) => setNumber("max_iterations", e.target.value)}
-                    onBlur={() => settleNumber("max_iterations")}
-                  />
-                  <div className="hintline">一轮里模型与工具往返的上限。</div>
                 </div>
                 <div className="field">
                   <label>最大输出 Tokens</label>
